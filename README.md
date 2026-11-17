@@ -82,7 +82,7 @@ AIcoversong/
 欢迎提交可复现的问题和改进。[贡献指南](CONTRIBUTING.md) 说明了开发检查、数据边界与提交方式；漏洞请遵循 [安全政策](SECURITY.md)。
 
 ```powershell
-python tools/verify_package.py
+python tools/verify_package.py --tracked
 python -m unittest discover -s tests -v
 ```
 

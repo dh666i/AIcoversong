@@ -49,7 +49,7 @@ See [installation details](docs/INSTALL.md), [privacy](docs/PRIVACY.md), [contri
 ## Development
 
 ```powershell
-python tools/verify_package.py
+python tools/verify_package.py --tracked
 python -m unittest discover -s tests -v
 ```
 

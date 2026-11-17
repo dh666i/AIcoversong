@@ -12,7 +12,7 @@
 ## 本地检查
 
 ```powershell
-python tools/verify_package.py
+python tools/verify_package.py --tracked
 python -m unittest discover -s tests -v
 python -m compileall -q tools Applio
 ```
