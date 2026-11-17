@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/IAHispano/Applio",
+  "commit": "6f69726b140c615c8cc6831a7db8b7c5e48ba8af",
+  "copied_tracked_files": 216,
+  "excluded": [
+    ".github/"
+  ],
+  "local_changes": [
+    "app.py",
+    "assets/app_shell.py",
+    "assets/ui/shell.css",
+    "tabs/download/download.py",
+    "tabs/plugins/plugins.py",
+    ".gitignore"
+  ],
+  "additions": [
+    "cover_app.py",
+    "assets/ui/cover.css",
+    "assets/ui/aicoversong.svg",
+    "tabs/plugins/installed/CoverStudio/plugin.py"
+  ],
+  "stock_fixtures": "upstream-fixtures.json"
+}

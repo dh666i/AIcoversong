@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "dest": "Applio/rvc/models/embedders/contentvec/config.json",
+      "size": 1388,
+      "sha256": "2ddde063b795d38d9051a7215a092fecf4cfe148b54251e38de51d88d356898b",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/embedders/contentvec/config.json",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/embedders/contentvec/pytorch_model.bin",
+      "size": 378342945,
+      "sha256": "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/embedders/contentvec/pytorch_model.bin",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/ffmpeg.exe",
+      "size": 52925440,
+      "sha256": "b6a4d917a444790f4c06ada640c1c0c95aecde2f8953ed8d0dfb19352500bfcd",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/ffmpeg.exe",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/ffprobe.exe",
+      "size": 122135040,
+      "sha256": "2da5b980a9a14a808f423d181c4ed51c2b8af11b1366699f3f7eab0609926f8f",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/ffprobe.exe",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/predictors/fcpe.pt",
+      "size": 43362881,
+      "sha256": "8544427eebbf2baef6213cc9a05057e46961617a8e5bd96975a0d42da6a09059",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/predictors/fcpe.pt",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/predictors/rmvpe.pt",
+      "size": 181184272,
+      "sha256": "6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/predictors/rmvpe.pt",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/predictors/swift.onnx",
+      "size": 135090,
+      "sha256": "6385e8c2ebc3872e82c9ff5946228de44cd3be77a750ea53698b7dbfe94b0a22",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/predictors/swift.onnx",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/pretraineds/hifi-gan/f0D40k.pth",
+      "size": 142875703,
+      "sha256": "6b6ab091e70801b28e3f41f335f2fc5f3f35c75b39ae2628d419644ec2b0fa09",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/pretrained_v2/f0D40k.pth",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/pretraineds/hifi-gan/f0G40k.pth",
+      "size": 73106273,
+      "sha256": "3b2c44035e782c4b14ddc0bede9e2f4a724d025cd073f736d4f43708453adfcb",
+      "url": "https://huggingface.co/IAHispano/Applio/resolve/3ff370b7023086f57e200ef86a9a251ddf4da472/Resources/pretrained_v2/f0G40k.pth",
+      "origin": "https://huggingface.co/IAHispano/Applio/tree/3ff370b7023086f57e200ef86a9a251ddf4da472",
+      "license_note": "See docs/MODELS.md; repository-level license is not a blanket license for bundled third-party files."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/mel_band_roformer_kim_ft_unwa.ckpt",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mel_band_roformer_kim_ft_unwa.ckpt",
+      "size": 913100690,
+      "sha256": "e6bd8d333880191254a6ef6be3cb0ffa4dda9d3282e36b0cce2e88a660e00d39",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/config_mel_band_roformer_kim_ft_unwa.yaml",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/config_mel_band_roformer_kim_ft_unwa.yaml",
+      "size": 1721,
+      "sha256": "c910a0b1493fd3f9cee7a576a7498e44e660510dcaaf5d0d50d5363dde1d0010",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/bs_roformer_karaoke_frazer_becruily.ckpt",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/bs_roformer_karaoke_frazer_becruily.ckpt",
+      "size": 204436907,
+      "sha256": "eb90ee24c1154d83fbcfd27e96182f19e061557cc6e4746953125e08c29389f9",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/config_bs_roformer_karaoke_frazer_becruily.yaml",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/config_bs_roformer_karaoke_frazer_becruily.yaml",
+      "size": 1903,
+      "sha256": "1d3b58b473025183d0d3c91e7a444cb5f1418d9f34e8f46b8d2fb10d2cc8ab34",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt",
+      "size": 913107578,
+      "sha256": "9262877b87e9ebb0fb808a456b0a411fa677f5df31c8383c1254af531c078970",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/dereverb_mel_band_roformer_anvuew.yaml",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/dereverb_mel_band_roformer_anvuew.yaml",
+      "size": 1846,
+      "sha256": "1599d9ea717ea2b5b3bc55d936f752b8d0f67baaa3de95acd6d03259a2f37784",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/download_checks.json",
+      "url": "https://raw.githubusercontent.com/TRvlvr/application_data/main/filelists/download_checks.json",
+      "size": 28267,
+      "sha256": "d3622e1fa19c161d3cf704927711b453d593a3f1eb0f2e0838c3136907935151",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/mdx_model_data.json",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/mdx_model_data.json",
+      "size": 11975,
+      "sha256": "7b5bcc54884cf2a68c9857c0a3bfb0e0a86dc2d56188ced2ed7b9e17311eb0b8",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/vr_model_data.json",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/vr_model_data.json",
+      "size": 4380,
+      "sha256": "6a2021b9aa355c10f845b68c73944d47bd9e1fdf37b8a584b14ce8f88b09bb2f",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
+    }
+  ]
+}
