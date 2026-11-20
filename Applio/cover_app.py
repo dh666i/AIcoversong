@@ -99,15 +99,23 @@ document.addEventListener('play', (event) => {
 
 _WAVE_MARK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 10v4m4-8v12m5-15v18m5-15v12m4-8v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
 _GITHUB_MARK = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.2.8-.6v-2.2c-3.2.7-3.9-1.3-3.9-1.3-.5-1.3-1.3-1.7-1.3-1.7-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.1 1.2a10.8 10.8 0 0 1 5.8 0c2.1-1.5 3.1-1.2 3.1-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.1v3.3c0 .4.2.7.8.6A11.4 11.4 0 0 0 12 .8Z"/></svg>'
-_SIGNAL_HEIGHTS = [10, 18, 30, 16, 39, 49, 25, 39, 55, 31, 46, 23, 13, 35, 50, 58, 34, 21, 42, 28, 46, 57, 38, 23, 31, 15, 24, 13, 6]
-_SIGNAL = ''.join(f'<i style="--h:{height}px;--o:{.38 + height / 100:.2f}"></i>' for height in _SIGNAL_HEIGHTS)
+_GROOVES = "".join(
+    f'<path d="M-16,{88+n:.1f} C50,{90+n:.1f} 66,{25+n*.32:.1f} 127,{27+n*.8:.1f} '
+    f'S206,{149-n*.64:.1f} 274,{113-n*.95:.1f} S352,{-20+n*.63:.1f} 427,{61+n:.1f} '
+    f'S522,{98+n*.46:.1f} 575,{33+n*.32:.1f}"/>' for n in range(-46, 47, 3)
+)
+_SIGNAL = f'''<svg class="groove-art" width="560" height="144" viewBox="0 0 560 144" fill="none" aria-hidden="true">
+  <defs><linearGradient id="groove-ink" x1="0" y1="84" x2="560" y2="48" gradientUnits="userSpaceOnUse">
+  <stop stop-color="#7966bf"/><stop offset=".28" stop-color="#c7a4fd"/><stop offset=".53" stop-color="#afa9ff"/>
+  <stop offset=".78" stop-color="#8be5dc"/><stop offset="1" stop-color="#61988f"/></linearGradient></defs>
+  <g stroke="url(#groove-ink)" stroke-width="1">{_GROOVES}</g></svg>'''
 MASTHEAD = f'''<header id="masthead">
   <div class="brand" aria-label="AIcoversong"><span class="brand-mark">{_WAVE_MARK}</span><span class="brand-name"><span>AI</span>coversong</span><span class="brand-label">个人声音工作室</span></div>
   <nav class="head-links" aria-label="项目链接"><span class="local-badge"><i aria-hidden="true"></i>本地创作</span><a class="repo-link" href="https://github.com/dh666i/AIcoversong" target="_blank" rel="noopener noreferrer">{_GITHUB_MARK}<span>GitHub</span></a></nav>
 </header>
-<section class="studio-hero" aria-label="欢迎使用">
-  <div class="hero-copy"><p class="studio-eyebrow">YOUR VOICE. YOUR SONG.</p><h1>把喜欢的歌，唱成<em>自己的声音。</em></h1><p>选一首歌，留住熟悉的旋律。让下一次播放，属于你的音色。</p></div>
-  <div class="hero-signal" aria-hidden="true"><div class="signal-bars">{_SIGNAL}</div><div class="signal-caption"><span>AIcoversong</span><span>VOICE STUDIO</span></div></div>
+<section class="studio-hero" aria-label="个人翻唱工作室">
+  <div class="hero-copy"><p class="studio-eyebrow"><i aria-hidden="true"></i> COVER STUDIO <span>/</span> 声音创作</p><h1>喜欢的歌，<em>你的声音。</em></h1><p>用自己的音色翻唱，再细听每一轨。</p></div>
+  <div class="groove-plate" aria-hidden="true">{_SIGNAL}<div class="groove-legend"><span>FIG. 01</span><i></i><span>VOICEPRINT</span></div></div>
 </section>'''
 FOOTER = '''<footer class="studio-footer"><span>AIcoversong · 用自己的声音，唱喜欢的歌。</span><div class="footer-links"><span>基于 <a href="https://github.com/IAHispano/Applio" target="_blank" rel="noopener noreferrer">Applio / RVC</a></span><a href="https://github.com/dh666i/AIcoversong#readme" target="_blank" rel="noopener noreferrer">使用文档</a><a href="https://github.com/dh666i/AIcoversong/issues" target="_blank" rel="noopener noreferrer">反馈问题</a></div></footer>'''
 

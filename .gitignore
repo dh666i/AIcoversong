@@ -45,6 +45,8 @@ __pycache__/
 *.7z
 /Applio/assets/config.json
 /Applio/assets/*_pid.txt
+/Applio/.applio-update/
+/Applio/.github/
 /Applio/assets/audios/
 /Applio/rvc/models/**
 !/Applio/rvc/models/**/

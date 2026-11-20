@@ -24,7 +24,7 @@ Screenshots show an isolated UI demo with synthetic audio and a placeholder voic
 - Train a personal voice model from saved recordings, with visible task status.
 - Upload a song and run vocal separation, lead/backing separation, dereverberation, conversion and mixing.
 - Choose how to handle backing vocals, pitch range and vocal/instrumental levels.
-- Listen to and download the finished cover and separate stems; revisit previous results.
+- Listen to and download the finished cover and separate stems; search, sort, rename, recover or archive works, and create a new mix version without overwriting the original.
 
 The converted voice follows the source melody. Quality still depends on separation, training coverage, harmony and singing style; the app does not guarantee perfect pronunciation or pitch.
 
