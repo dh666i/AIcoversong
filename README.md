@@ -6,7 +6,7 @@
 
 本地录音 · 音色训练 · AI 翻唱
 
-[English](README.en.md) · [安装指南](docs/INSTALL.md) · [模型与授权](docs/MODELS.md) · [反馈问题](https://github.com/dh666i/AIcoversong/issues)
+[下载最新版源码](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip) · [安装与更新](docs/INSTALL.md) · [更新日志](CHANGELOG.md) · [English](README.en.md)
 
 [![CI](https://github.com/dh666i/AIcoversong/actions/workflows/check.yml/badge.svg)](https://github.com/dh666i/AIcoversong/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE)
@@ -14,11 +14,18 @@
 
 </div>
 
-AIcoversong 把录音、训练自己的音色、上传歌曲、分离人声、转换与混音放在一个中文网页里。你不需要自己串联多个音频工具。
+AIcoversong 是运行在 Windows 电脑上的中文翻唱工作台。可以用麦克风录下自己的声音并训练音色，再上传一首歌，在本机完成分离、转换、混音和试听。
 
 项目基于 [Applio](https://github.com/IAHispano/Applio)、RVC 与 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator) 构建，保留上游许可与致谢。模型在本地运行，录音与歌曲无需上传到第三方推理服务。
 
-![AIcoversong 创作工作台](docs/images/workspace.jpg)
+![创作工作台的原曲上传、个人音色选择和最近作品试听](docs/images/workspace.jpg)
+
+<details>
+<summary>查看展开的声音设置和混音参数</summary>
+
+![音域与和声选项、混音滑块、数值输入框和重置按钮](docs/images/settings.jpg)
+
+</details>
 
 <details>
 <summary>查看录音与训练页面</summary>
@@ -29,13 +36,15 @@ AIcoversong 把录音、训练自己的音色、上传歌曲、分离人声、�
 
 截图来自隔离的界面演示，使用合成音频与演示音色名称。
 
-## 可以做什么
+## 工作台用法
 
-- **录下自己的声音**：直接使用浏览器麦克风，按清楚区分的朗读和清唱稿录制、试听、保存。
-- **训练个人音色**：把已保存的录音整理成训练集，查看训练状态，训练完成后选用对应音色。
-- **一首歌，一次操作**：上传歌曲后，依次分离人声和伴奏、提取主唱并去混响、转换音色、处理和混音。
-- **按你的习惯调整**：选择和声保留方式、音域处理方式、人声与伴奏音量。
-- **保留作品**：试听完整翻唱或单独的人声、伴奏，下载结果；在作品库搜索、排序、改名、回收/恢复，并从已保存分轨创建新的混音版本。
+| 标签页 | 操作 |
+|---|---|
+| **我的声音** | 按稿件朗读或清唱，试听后保存。累计至少 5 分钟录音并勾选使用声明，即可训练个人音色。遇到设备或权限问题，按麦克风旁的提示处理后点「重新检测」。 |
+| **创作工作台** | 拖入原曲，选好个人音色，点「开始翻唱」。右侧显示制作进度，完成后可试听成品或展开「分开听」试听分轨。空闲时可查看最近作品的波形和时长，直接播放或下载。 |
+| **作品库** | 按歌名或原文件名搜索，切换排序。点「管理」可以改名、移入回收站，或从已有分轨创建新的混音版本。移入回收站的作品可以恢复。 |
+
+需要调整声音时，展开「声音设置」选择音域适配、和声处理和人声清晰度。「混音与精细调节」里还有混响、人声与伴奏音量、精细处理和音色检索强度。滑块旁可直接输入数值，也可以单独恢复该项默认值。
 
 翻唱会跟随输入歌曲的旋律。它不是“任何素材都不会跑调”的保证：分离质量、音色训练覆盖、原唱和声与唱法都会影响结果。
 
@@ -44,7 +53,7 @@ AIcoversong 把录音、训练自己的音色、上传歌曲、分离人声、�
 当前正式安装路径面向 **Windows 10/11 x64 + NVIDIA CUDA**。参考开发环境是 Windows 11、RTX 5060 Ti 16GB、32GB 内存；其他显存容量未逐一验证。macOS、AMD 和 Linux 的完整流程暂未验证。
 
 1. 安装近期 NVIDIA 驱动和 [uv](https://docs.astral.sh/uv/getting-started/installation/)；Windows 可用 `winget install --id astral-sh.uv --exact`。
-2. 下载本仓库 ZIP 并解压，或执行：
+2. 下载并解压[最新发布的源码包](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip)，或克隆仓库：
 
    ```powershell
    git clone https://github.com/dh666i/AIcoversong.git
@@ -57,11 +66,11 @@ AIcoversong 把录音、训练自己的音色、上传歌曲、分离人声、�
    powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup.ps1 -DownloadModels
    ```
 
-4. 双击 `启动翻唱.bat`，浏览器打开 `http://127.0.0.1:6969`。先在「我的声音」录音并训练，再在翻唱页上传歌曲。
+4. 双击 `启动翻唱.bat`，浏览器打开 `http://127.0.0.1:6969`。首次使用可先到「我的声音」录音和训练，已有个人音色可直接打开「创作工作台」。
 
 首次安装需要联网下载依赖与约 **3.02GB** 基础模型/工具文件，另有数 GB 的 PyTorch 和 Python 依赖，建议至少预留 **20GB**，训练和作品会继续占用空间。仓库不包含作者的个人音色、录音、歌曲或付费服务凭据。
 
-更详细的要求、国内下载选项与故障处理见 [安装指南](docs/INSTALL.md)。安装器不预设个人代理地址，可使用你的标准网络环境。
+已有安装请在任务结束后关闭旧服务，更新源码，再双击 `启动翻唱.bat`。具体步骤及国内下载选项见[安装与更新指南](docs/INSTALL.md)。
 
 ## 项目结构
 

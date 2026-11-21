@@ -53,16 +53,17 @@ class CoverLifecycleTests(unittest.TestCase):
 
     def test_voice_warning_slot_is_hidden_when_there_is_no_warning(self):
         with patch.object(ui, "_voices", return_value=[("我的声音", "voice.pth")]):
-            alert, button = ui._cover_voice_change("voice.pth")
-            refreshed = ui._refresh_voices_ui()
+            alert, reason, button = ui._cover_input_change("song.wav", "voice.pth", "")
+            refreshed = ui._refresh_voices()
         self.assertFalse(alert["visible"])
         self.assertEqual(alert["value"], "")
+        self.assertEqual(reason, "")
         self.assertTrue(button["interactive"])
-        self.assertFalse(refreshed[1]["visible"])
+        self.assertEqual(refreshed["value"], "voice.pth")
 
     def test_voice_warning_uses_accessible_semantic_html(self):
         with patch.object(ui, "_voices", return_value=[]):
-            alert, button = ui._cover_voice_change(None)
+            alert, _, button = ui._cover_input_change("song.wav", None, "")
         self.assertTrue(alert["visible"])
         self.assertIn('class="studio-alert" data-tone="warning" role="alert"', alert["value"])
         self.assertIn("还没有个人音色", alert["value"])
@@ -281,7 +282,7 @@ class CoverLifecycleTests(unittest.TestCase):
     def test_demo_voice_is_never_defaulted_or_allowed_to_start(self):
         voices = [("演示音色", "demo.pth"), ("我的声音", "voice.pth")]
         self.assertEqual(ui._default_voice(voices), "voice.pth")
-        self.assertFalse(ui._cover_voice_state("demo.pth", voices)[1]["interactive"])
+        self.assertTrue(ui._cover_requirements("song.wav", "demo.pth", voices)[1])
         with patch.object(ui, "_voices", return_value=[("演示音色", "demo.pth")]):
             with self.assertRaises(ui.gr.Error):
                 ui._start_cover("same-song.wav", "demo.pth", "auto", "original", .75, 1., 0., 0., True, .25)
@@ -290,6 +291,29 @@ class CoverLifecycleTests(unittest.TestCase):
         self.assertEqual(ui._default_cover_settings(True),
                          ("auto", "original", .75, 1., 0., 0., True, .25))
         self.assertEqual(ui._default_cover_settings(False)[6], False)
+
+    def test_cover_requires_both_upload_and_available_voice(self):
+        for song, model in [(None, "voice.pth"), ("song.wav", None), ("song.wav", "deleted.pth")]:
+            with self.subTest(song=song, model=model):
+                _alert, reason, button = ui._cover_input_change(song, model, "")
+                self.assertTrue(reason)
+                self.assertFalse(button["interactive"])
+                self.assertFalse(ui._poll_cover("", reason)[5]["interactive"])
+        with self.assertRaises(ui.gr.Error):
+            ui._start_cover("song.wav", "deleted.pth", "auto", "original", .75, 1., 0., 0., True, .25)
+
+    def test_input_changes_and_page_reload_obey_current_task(self):
+        self.gate = threading.Event()
+        token = self.start()[-2]
+        for song, model in [("other.wav", "voice.pth"), (None, "voice.pth"), ("song.wav", None)]:
+            self.assertFalse(ui._cover_input_change(song, model, token)[2]["interactive"])
+        cleared = ui._cover_input_change(None, "voice.pth", token)[1]
+        self.assertFalse(ui._stop_cover(token, cleared)[5]["interactive"])
+        self.gate.set()
+        self.wait(token)
+        self.assertFalse(ui._poll_cover(token, cleared)[5]["interactive"])
+        self.assertFalse(ui._again(token, cleared)[5]["interactive"])
+        self.assertTrue(ui._cover_input_change("new.wav", "voice.pth", token)[2]["interactive"])
 
 
 if __name__ == "__main__":

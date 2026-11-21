@@ -19,9 +19,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from urllib.parse import quote
 
 import gradio as gr
+import numpy as np
+import soundfile as sf
 
 _ROOT = Path(__file__).resolve().parents[5]
 if str(_ROOT / "tools") not in sys.path:
@@ -73,13 +76,6 @@ def _refresh_voices():
     return gr.update(choices=voices, value=selected)
 
 
-def _refresh_voices_ui():
-    voices = _voices()
-    selected = _default_voice(voices)
-    notice, start = _cover_voice_state(selected, voices)
-    return gr.update(choices=voices, value=selected), _voice_alert_update(notice), start
-
-
 def _is_demo_voice(model: str | None, voices=None) -> bool:
     if not model:
         return False
@@ -98,18 +94,19 @@ def _default_voice(voices):
                 voices[0][1] if voices else None)
 
 
-def _cover_voice_state(model, voices=None):
+def _cover_requirements(song, model, voices=None):
+    """Return a voice notice and the reason the current inputs cannot start a cover."""
     voices = _voices() if voices is None else voices
     personal = any(not _is_demo_voice(value, voices) for _label, value in voices)
     if not personal:
         return ("还没有个人音色。请先打开“我的声音”，录音并完成训练；演示音色只用于界面预览。",
-                gr.update(interactive=False, value="先训练个人音色"))
-    if not model:
-        return ("请选择一个个人音色后开始翻唱。", gr.update(interactive=False, value="选择个人音色"))
+                "先训练个人音色")
+    if not any(value == model for _label, value in voices):
+        return "请选择一个可用的个人音色。", "请选择个人音色"
     if _is_demo_voice(model, voices):
         return ("这个演示音色不能用于生成作品。请选择训练得到的个人音色。",
-                gr.update(interactive=False, value="请选择个人音色"))
-    return ("", gr.update(interactive=True, value="开始翻唱"))
+                "请选择个人音色")
+    return "", "" if song else "请先选择歌曲"
 
 
 def _studio_alert_html(message: str, tone: str = "warning") -> str:
@@ -127,14 +124,22 @@ def _voice_alert_update(message: str):
     return gr.update(value=_studio_alert_html(message), visible=bool(message))
 
 
-def _cover_voice_change(model):
-    message, button = _cover_voice_state(model)
-    return _voice_alert_update(message), button
+def _cover_start_button(blocked_reason, snapshot):
+    if snapshot is not None and not snapshot[2]:
+        return gr.update(interactive=False, value="正在停止…" if snapshot[3] else "正在制作…")
+    return gr.update(interactive=not blocked_reason, value=blocked_reason or "开始翻唱")
+
+
+def _cover_input_change(song, model, current_task):
+    message, reason = _cover_requirements(song, model)
+    return _voice_alert_update(message), reason, _cover_start_button(reason, _task_snapshot(current_task))
 
 
 def _settings_summary(pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate):
-    pitch = dict(RANGE_CHOICES).get(pitch_mode, "自动")
-    harmonies = dict(BACKING_CHOICES).get(backing, "保留原唱和声")
+    pitch = next((label for label, value in RANGE_CHOICES if value == pitch_mode), "自动")
+    harmonies = next((label for label, value in BACKING_CHOICES if value == backing), "保留原唱和声")
+    pitch = pitch.removesuffix("（推荐）")
+    harmonies = harmonies.removesuffix("（推荐）")
     parts = [pitch, harmonies, f"清晰度 {float(clarity):.0%}", f"混响 {float(reverb):.1f}"]
     if float(vocal_gain) or float(music_gain):
         parts.append(f"人声 {float(vocal_gain):+.1f} dB · 伴奏 {float(music_gain):+.1f} dB")
@@ -142,7 +147,7 @@ def _settings_summary(pitch_mode, backing, clarity, reverb, vocal_gain, music_ga
         parts.append("未精细处理")
     if float(index_rate) != 0.25:
         parts.append(f"检索 {float(index_rate):.2f}")
-    return "当前设置：" + " · ".join(parts)
+    return " · ".join(parts)
 
 
 def _default_cover_settings(refine_ready):
@@ -226,7 +231,7 @@ function structure(data) {
   const steps = (data.steps || []).map((label, i) =>
     `<li data-i="${i}"><span class="dot"></span><span class="name">${esc(label)}</span></li>`).join('');
   root.innerHTML = `
-    <div class="stage-head" aria-hidden="true"><span class="stage-code">LIVE / PROCESS</span><span class="stage-badge"></span></div>
+    <div class="stage-head" aria-hidden="true"><span class="stage-code">任务进度</span><span class="stage-badge"></span></div>
     ${data.title ? `<h2 class="what">${esc(data.title)}</h2>` : ''}
     <ol class="steps" style="--n:${(data.steps || []).length}">${steps}<span class="rail"><i></i></span></ol>
     <div class="stage-meter" data-mode="indeterminate" role="progressbar" aria-label="任务整体进度" aria-valuemin="0" aria-valuemax="100" aria-valuetext="正在准备任务进度"><i aria-hidden="true"></i></div>
@@ -339,51 +344,57 @@ update();
 """
 
 PROGRESS_CSS = """
-.stage { --stage-violet: #b9a5ff; --stage-cyan: #79e6e2; display: block; }
+.stage {
+  --stage-cyan: var(--primary, var(--color-accent));
+  --stage-violet: var(--cyan, var(--color-accent));
+  --stage-surface: var(--input-bg, var(--block-background-fill));
+  --stage-line: var(--line-strong, var(--border-color-primary));
+  --stage-text: var(--text, var(--body-text-color));
+  --stage-muted: var(--muted, var(--body-text-color-subdued));
+  --stage-accent: var(--stage-cyan);
+  display: block; margin: 0; padding: 20px; border: 1px solid var(--stage-line);
+  border-radius: 22px; background: var(--stage-surface); color: var(--stage-text);
+}
 .stage[data-state="idle"] { display: none; }
-.stage-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 15px; }
-.stage-code { color: var(--stage-cyan); font: 600 10px/1 var(--font-mono); letter-spacing: .16em; }
-.stage-badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid #4b416f; border-radius: 999px; background: #211d34; color: #d5c9ff; font-size: 10px; line-height: 1; letter-spacing: .04em; }
-.stage-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; }
-.stage-badge[data-state="running"] { color: var(--stage-cyan); border-color: #315b63; background: #13262c; }
-.stage-badge[data-state="done"] { color: #a5f0d7; border-color: #316153; background: #152720; }
-.stage-badge[data-state="failed"] { color: #ffb6c8; border-color: #673d58; background: #281a2a; }
-.stage-badge[data-state="stopped"] { color: #c3bbd4; border-color: #514b60; background: #211f28; }
-.what { margin: 0 0 22px; font-family: var(--sans); font-weight: 650; font-size: 20px; line-height: 1.4; color: var(--ink); overflow-wrap: anywhere; }
-.hint { margin: 2px 0 0; font-size: 14px; color: var(--ink-3); }
-.hint:empty { display: none; }
-.steps { position: relative; display: grid; grid-template-columns: repeat(var(--n, 4), 1fr); margin: 0; padding: 0 0 2px; list-style: none; }
-.steps li { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
-.steps .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--paper-3); box-shadow: 0 0 0 4px var(--paper); transition: background .35s, transform .35s, box-shadow .35s; }
-.steps .name { font-size: 12px; line-height: 1.35; color: var(--ink-3); max-width: 10em; transition: color .35s; }
-.steps li[data-s="done"] .dot { background: var(--done); }
-.steps li[data-s="done"] .name { color: var(--ink-2); }
-.steps li[data-s="now"] .dot { background: var(--stage-cyan); box-shadow: 0 0 0 4px var(--paper), 0 0 15px #79e6e266; transform: scale(1.2); }
-.steps li[data-s="now"] .name { color: var(--ink); font-weight: 600; }
-.steps li[data-s="failed"] .dot { background: var(--bad); }
-.steps li[data-s="failed"] .name { color: var(--bad); }
-.steps li[data-s="stopped"] .dot { background: var(--ink-3); }
-.rail { position: absolute; left: calc(50% / var(--n, 4)); right: calc(50% / var(--n, 4)); top: 6px; height: 2px; background: var(--paper-3); border-radius: 2px; overflow: hidden; }
-.rail i { display: block; height: 100%; background: linear-gradient(90deg, var(--stage-violet), var(--stage-cyan)); transform-origin: left; transform: scaleX(0); transition: transform .7s cubic-bezier(.22,.8,.25,1); }
-.stage-meter { position: relative; height: 4px; margin: 20px 0 0; overflow: hidden; border-radius: 99px; background: var(--paper-3); }
-.stage-meter i { display: block; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--stage-violet), var(--stage-cyan)); transform-origin: left; transform: scaleX(0); transition: transform .7s cubic-bezier(.22,.8,.25,1); }
-.stage-meter[data-mode="indeterminate"] i { width: 32%; transform: none; background: linear-gradient(90deg, transparent, var(--stage-violet), var(--stage-cyan), transparent); animation: meter-sweep 1.6s cubic-bezier(.6,0,.4,1) infinite; }
+.stage[data-state="done"] { --stage-accent: var(--success, var(--stage-cyan)); }
+.stage[data-state="failed"] { --stage-accent: var(--danger, var(--error-text-color)); }
+.stage[data-state="stopped"] { --stage-accent: var(--stage-muted); }
+.stage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
+.stage-code { color: var(--stage-muted); font-size: 13px; font-weight: 650; }
+.stage-badge {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--stage-accent) 40%, var(--stage-line)); border-radius: 999px;
+  color: var(--stage-text); background: color-mix(in srgb, var(--stage-accent) 10%, transparent);
+  font-size: 12px; line-height: 1.4; font-weight: 650;
+}
+.stage-badge::before { width: 7px; height: 7px; border-radius: 50%; background: var(--stage-accent); content: ""; }
+.what { margin: 0 0 20px; color: var(--stage-text); font-weight: 800; font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
+.hint, .time { margin: 7px 0 0; font-size: 13px; line-height: 1.6; color: var(--stage-muted); }
+.hint:empty, .time:empty { display: none; }
+.steps { position: relative; display: grid; grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.steps li { position: relative; z-index: 1; display: flex; align-items: center; flex-direction: column; gap: 8px; text-align: center; }
+.steps .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--stage-line); transition: background .2s; }
+.steps .name { max-width: 10em; padding: 0 2px; font-size: 12px; line-height: 1.45; color: var(--stage-muted); }
+.steps li[data-s="done"] .dot { background: var(--success, var(--stage-cyan)); }
+.steps li[data-s="now"] .dot { background: var(--stage-cyan); outline: 2px solid color-mix(in srgb, var(--stage-cyan) 28%, transparent); outline-offset: 2px; }
+.steps li[data-s="now"] .name, .steps li[data-s="done"] .name { color: var(--stage-text); font-weight: 650; }
+.steps li[data-s="failed"] .dot { background: var(--stage-accent); }
+.steps li[data-s="failed"] .name { color: var(--stage-accent); }
+.rail { position: absolute; inset-inline: calc(50% / var(--n, 4)); top: 5px; height: 2px; background: var(--stage-line); overflow: hidden; }
+.rail i, .stage-meter i { display: block; height: 100%; width: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--stage-violet), var(--stage-cyan)); transform-origin: left; transform: scaleX(0); transition: transform .65s ease; }
+.stage-meter { height: 5px; margin: 18px 0 0; overflow: hidden; border-radius: 999px; background: var(--stage-line); }
+.stage-meter[data-mode="indeterminate"] i { width: 32%; animation: meter-sweep 1.6s cubic-bezier(.6,0,.4,1) infinite; }
 .stage-meter[data-mode="unknown"] i { width: 0; transform: none; opacity: 0; }
-.stage[data-state="done"] .stage-meter i { background: var(--done); }
-.stage[data-state="failed"] .stage-meter i { background: var(--bad); }
-.stage[data-state="stopped"] .stage-meter i { background: var(--ink-3); }
-.stage[data-state="done"] .rail i { background: var(--done); }
-.now { margin: 19px 0 0; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; font-size: 18px; line-height: 1.4; color: var(--ink); }
-.now b { font-weight: 600; }
-.now .pct { font-variant-numeric: tabular-nums; color: var(--stage-cyan); font: 600 16px/1 var(--font-mono); }
-.stage[data-state="failed"] .now b { color: var(--bad); font-size: 17px; font-weight: 500; white-space: pre-line; }
-.time { margin: 7px 0 0; font: 12px/1.7 var(--font-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; min-height: 1.5em; }
+.stage:not([data-state="running"]) :is(.rail i, .stage-meter i) { background: var(--stage-accent); }
+.now { margin: 14px 0 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 16px; line-height: 1.5; color: var(--stage-text); }
+.now b { min-width: 0; overflow-wrap: anywhere; white-space: pre-line; font-weight: 650; }
+.now .pct { font: 700 15px/1 var(--mono, monospace); color: var(--stage-accent); }
+.stage[data-state="failed"] .now b { color: var(--stage-accent); }
+.time { font-variant-numeric: tabular-nums; }
 .stage-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.notes p { margin: 14px 0 0; padding: 12px 14px; border-left: 3px solid var(--lamp); background: var(--paper-2); color: var(--ink-2); font-size: 14.5px; line-height: 1.7; border-radius: 0 8px 8px 0; }
-@keyframes breathe { 0%, 100% { box-shadow: 0 0 0 5px var(--paper), 0 0 0 5px transparent; } 50% { box-shadow: 0 0 0 5px var(--paper), 0 0 0 10px color-mix(in srgb, var(--lamp) 16%, transparent); } }
+.notes p { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--stage-line); border-radius: 14px; background: var(--glass, transparent); color: var(--stage-text); font-size: 13px; line-height: 1.6; }
 @keyframes meter-sweep { from { transform: translateX(-125%); } to { transform: translateX(440%); } }
-@media (prefers-reduced-motion: reduce) { .steps .dot, .rail i, .stage-meter i { transition: none; } .stage-meter[data-mode="indeterminate"] i { width: 100%; transform: scaleX(.4); opacity: .7; animation: none; } }
-@media (max-width: 560px) { .steps .name { font-size: 12px; } .now { font-size: 17px; } .what { font-size: 20px; margin-bottom: 24px; } }
+@media (prefers-reduced-motion: reduce) { .rail i, .stage-meter i { transition: none; } .stage-meter[data-mode="indeterminate"] i { animation: none; transform: none; } }
 """
 
 
@@ -401,12 +412,17 @@ def _file_url(path) -> str:
     return "/gradio_api/file=" + quote(str(path).replace("\\", "/"), safe="/:")
 
 
-def _track(path, download_name: str, label: str = "", main: bool = False) -> str:
+def _track(path, download_name: str, label: str = "", main: bool = False, lazy: bool = False) -> str:
     """One player with its download link. The browser's own player: press play, click anywhere on the bar."""
     url = html.escape(_file_url(path), quote=True)
     name = f'<span class="track-name">{html.escape(label)}</span>' if label else ""
-    return (f'<div class="track{" track-main" if main else ""}">{name}'
-            f'<audio controls preload="metadata" controlslist="nodownload noplaybackrate" src="{url}"></audio>'
+    initial_state = "idle" if lazy else "loading"
+    initial_message = "点击播放后读取音频信息" if lazy else "正在读取音频信息…"
+    preload = "none" if lazy else "metadata"
+    return (f'<div class="track{" track-main" if main else ""}" data-audio-state="{initial_state}">{name}'
+            f'<audio data-lazy="{str(lazy).lower()}" controls preload="{preload}" controlslist="nodownload noplaybackrate" src="{url}"></audio>'
+            f'<span class="track-status" role="status" aria-live="polite"><span class="track-message">{initial_message}</span>'
+            f'<button type="button" class="track-retry" hidden>重试</button></span>'
             f'<a class="save" href="{url}" download="{html.escape(download_name, quote=True)}">下载</a></div>')
 
 
@@ -500,7 +516,7 @@ def _run_cover_task(task, arguments):
             _publish_cover(task, terminal, finished=True)
 
 
-def _cover_view(snapshot):
+def _cover_view(snapshot, blocked_reason=""):
     """Progress/form/stage/result/again/start/stop/empty/timer updates."""
     # Gradio consumes update dictionaries in place during postprocessing.
     # Never share an update object between components or successive responses.
@@ -510,10 +526,10 @@ def _cover_view(snapshot):
     def shown():
         return gr.update(visible=True)
 
-    ready = gr.update(interactive=True, value="开始翻唱")
+    start_button = _cover_start_button(blocked_reason, snapshot)
     if snapshot is None:
         return (dict(IDLE), gr.skip(), hidden(), gr.update(value="", visible=False), hidden(),
-                ready, hidden(), shown(), gr.update(active=False))
+                start_button, hidden(), shown(), gr.update(active=False))
     title, item, finished, cancelling = snapshot
     progress = {**item.get("progress", {}), "title": title, "run": item.get("run")}
     if not finished:
@@ -522,19 +538,19 @@ def _cover_view(snapshot):
         if cancelling:
             progress["detail"] = "正在停止"
         return (progress, gr.skip(), shown(), gr.update(value="", visible=False), hidden(),
-                gr.update(interactive=False, value="正在停止…" if cancelling else "正在制作…"),
+                start_button,
                 gr.update(visible=True, interactive=not cancelling), hidden(), gr.update(active=True))
     state = progress.get("state")
     if state == "done":
         progress["message"] = "翻唱好了"
         return (progress, gr.skip(), shown(), gr.update(value=_result_html(item, title), visible=True),
-                gr.update(visible=True, value="继续制作"), ready, hidden(), hidden(), gr.update(active=False))
+                gr.update(visible=True, value="继续制作"), start_button, hidden(), hidden(), gr.update(active=False))
     if state == "stopped":
         return (progress, gr.skip(), shown(), gr.update(value="", visible=False), hidden(),
-                ready, hidden(), hidden(), gr.update(active=False))
+                start_button, hidden(), hidden(), gr.update(active=False))
     progress["message"] = progress.get("error") or progress.get("message") or "没有完成，请重试。"
     return (progress, gr.skip(), shown(), gr.update(value="", visible=False),
-            gr.update(visible=True, value="继续制作"), ready, hidden(), hidden(), gr.update(active=False))
+            gr.update(visible=True, value="继续制作"), start_button, hidden(), hidden(), gr.update(active=False))
 
 
 def _start_cover(song, model, pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate,
@@ -542,11 +558,9 @@ def _start_cover(song, model, pitch_mode, backing, clarity, reverb, vocal_gain, 
     """Start a task immediately; /cover returns a task token, not a long stream."""
     if not song:
         raise gr.Error("先选一首歌。", title="还不能开始", print_exception=False)
-    voices = _voices()
-    if not model or not any(not _is_demo_voice(value, voices) for _label, value in voices):
-        raise gr.Error("还没有个人音色。先到“我的声音”里录音并训练一次。", title="还不能开始", print_exception=False)
-    if _is_demo_voice(model, voices):
-        raise gr.Error("演示音色只用于界面预览，请选择训练得到的个人音色。", title="还不能开始", print_exception=False)
+    voice_notice, reason = _cover_requirements(song, model)
+    if reason:
+        raise gr.Error(voice_notice, title="还不能开始", print_exception=False)
     previous = _task_snapshot(current_task)
     if previous is not None and not previous[2]:
         view = _cover_view(previous)
@@ -580,80 +594,149 @@ def _start_cover(song, model, pitch_mode, backing, clarity, reverb, vocal_gain, 
     return (*view[:-1], task.token, view[-1])
 
 
-def _poll_cover(current_task=""):
-    return _cover_view(_task_snapshot(current_task))
+def _poll_cover(current_task="", blocked_reason=""):
+    return _cover_view(_task_snapshot(current_task), blocked_reason)
 
 
-def _stop_cover(current_task=""):
+def _stop_cover(current_task="", blocked_reason=""):
     with _COVER_TASKS_LOCK:
         task = _COVER_TASKS.get(current_task) if isinstance(current_task, str) else None
         if task is not None and not task.finished:
             task.cancel.set()
-    return _poll_cover(current_task)
+    return _poll_cover(current_task, blocked_reason)
 
 
-def _again(current_task=""):
+def _again(current_task="", blocked_reason=""):
     """Back to the form, with the song and the settings as they were."""
     snapshot = _task_snapshot(current_task)
     if snapshot is not None and not snapshot[2]:
-        view = _cover_view(snapshot)
+        view = _cover_view(snapshot, blocked_reason)
         return (*view[:-1], current_task, view[-1])
-    view = _cover_view(None)
+    view = _cover_view(None, blocked_reason)
     return (*view[:-1], "", view[-1])
 
 
-def _cover_tab():
+def _cover_preparation(song, model):
+    voice_ready = bool(model) and not _is_demo_voice(model, [])
+    if not song:
+        status = "等待原曲"
+    elif not voice_ready:
+        status = "等待个人音色"
+    else:
+        status = "可以开始制作"
+    ready = "true" if song and voice_ready else "false"
+    return (f'<div class="monitor-readiness" role="status" data-ready="{ready}">'
+            f'<span>本次任务</span><b>{status}</b></div>')
+
+
+@lru_cache(maxsize=8)
+def _recent_waveform(path: str, mtime_ns: int, file_size: int):
+    """Cache by file revision and sample at most 72 short windows across the mix."""
+    with sf.SoundFile(path) as audio:
+        if not audio.frames or audio.channels > 8:
+            return ""
+        duration = audio.frames / audio.samplerate
+        bins = min(72, audio.frames)
+        levels = []
+        for index in range(bins):
+            start = index * audio.frames // bins
+            end = (index + 1) * audio.frames // bins
+            count = min(end - start, 1024)
+            audio.seek(start + (end - start - count) // 2)
+            samples = audio.read(count, dtype="int16").astype("float64")
+            levels.append(float(np.sqrt(np.square(samples).mean())))
+
+    loudest = max(levels) or 1
+    width = bins * 4
+    segments = []
+    for index, level in enumerate(levels):
+        height = 21 * level / loudest
+        if height >= 0.5:
+            segments.append(f"M{4 * index + 2},{24 - height:.1f}v{2 * height:.1f}")
+    seconds = int(duration)
+    end_time = f"{seconds // 60}:{seconds % 60:02d}" if seconds else f"{duration:.2f} 秒"
+    return (f'<figure class="monitor-waveform"><svg viewBox="0 0 {width} 48" preserveAspectRatio="none" '
+            f'aria-hidden="true"><path class="wave-base" d="M0,24H{width}"/>'
+            f'<path class="wave-levels" d="{" ".join(segments)}"/></svg>'
+            f'<figcaption><span aria-hidden="true">0:00</span><span>时长 {end_time}</span></figcaption></figure>')
+
+
+def _recent_cover_preview():
+    works = library.list_works(pipeline.OUTPUT)
+    if not works:
+        return ('<section class="monitor-recent"><h3>最近完成</h3>'
+                '<p class="monitor-no-work">暂无作品可试听</p></section>')
+    latest = works[0]
+    title = latest["title"]
+    date = str(latest.get("created_at") or "")[:16].replace("T", " ")
+    player = _track(latest["cover"], f"{title} 翻唱.wav")
+    try:
+        stat = Path(latest["cover"]).stat()
+        waveform = _recent_waveform(latest["cover"], stat.st_mtime_ns, stat.st_size)
+    except (OSError, ValueError, sf.LibsndfileError):
+        waveform = ""
+    return ('<section class="monitor-recent"><div class="monitor-meta"><h3>最近完成</h3>'
+            f'<span>{html.escape(date)}</span></div><p class="monitor-title">{html.escape(title)}</p>'
+            f'{waveform}{player}</section>')
+
+
+def _cover_tab(cover_tab=None):
     voices = _voices()
     refine_ready = pipeline.refine_available()
     selected_voice = _default_voice(voices)
-    voice_notice, voice_button = _cover_voice_state(selected_voice, voices)
+    voice_notice, initial_reason = _cover_requirements(None, selected_voice, voices)
+    blocked_reason = gr.State(initial_reason)
     defaults = _default_cover_settings(refine_ready)
     with gr.Row(elem_id="cover-workspace", equal_height=False):
-        with gr.Column(elem_id="cover-controls", elem_classes="studio-panel", scale=5, min_width=320):
-            gr.HTML('<div class="panel-heading"><span class="eyebrow">01 <i>/</i> INPUT</span>'
-                    '<h2>歌曲与音色</h2></div>', container=False)
+        with gr.Column(elem_id="cover-controls", elem_classes=["studio-panel", "tool-card", "input-panel"], scale=5, min_width=320):
+            gr.HTML('<div class="panel-head"><h2 class="panel-title">歌曲与音色</h2></div>', container=False)
             with gr.Column(elem_id="cover-form") as form:
-                song = gr.File(label="上传歌曲", file_types=["audio"], type="filepath", elem_id="song-drop",
-                               height=110)
+                with gr.Column(elem_id="song-field"):
+                    gr.HTML('<div class="song-field-label"><span>原曲文件</span>'
+                            '<small>MP3 / FLAC / WAV / M4A</small></div>', container=False)
+                    song = gr.File(label="原曲文件", file_types=["audio"], type="filepath",
+                                   show_label=False, elem_id="song-drop", height=84)
                 with gr.Row(elem_id="voice-picker-row"):
                     model = gr.Dropdown(label="我的音色", choices=voices, value=selected_voice,
                                         interactive=True, elem_id="voice-pick", scale=5,
                                         info=None if voices else "还没有音色？到“我的声音”录音并训练，完成后即可选择。")
-                    refresh_voice = gr.Button("刷新音色", elem_id="refresh-voices", size="sm", scale=1, min_width=90)
+                    refresh_voice = gr.Button("刷新音色", elem_id="refresh-voices", size="sm", scale=0, min_width=84)
                 voice_notice_view = gr.HTML(_studio_alert_html(voice_notice), visible=bool(voice_notice),
                                             elem_id="voice-required", container=False)
+                with gr.Row(elem_id="cover-settings-actions"):
+                    start = gr.Button(initial_reason, variant="primary", elem_id="start-cover",
+                                      size="lg", scale=0, min_width=136, interactive=False)
+                    gr.HTML('<p class="local-note">成品自动保存到作品库</p>', container=False)
                 with gr.Accordion("声音设置", open=False, elem_id="more-settings"):
-                    pitch_mode = gr.Radio(choices=RANGE_CHOICES, value=defaults[0], label="音域适配",
-                                          info="自动模式只在原唱明显超出你的录音音域时，将人声降低一个八度；伴奏保持原调。")
-                    backing = gr.Radio(choices=BACKING_CHOICES, value=defaults[1], label="和声处理",
-                                       info="保留原唱和声通常更自然，主唱仍会转换为你的声音。")
-                    clarity = gr.Slider(0, 1, value=defaults[2], step=0.05, label="人声清晰度",
-                                        info="歌词不清楚可调高；声音偏尖、偏薄可调低。")
-                    reverb = gr.Slider(0, 2, value=defaults[3], step=0.1, label="混响", info="1 接近原曲的空间感，0 不添加混响。")
-                    with gr.Row():
-                        vocal_gain = gr.Slider(-12, 12, value=defaults[4], step=0.5, label="人声音量（dB）", info="0 保持原曲人声响度。")
-                        music_gain = gr.Slider(-12, 12, value=defaults[5], step=0.5, label="伴奏音量（dB）", info="0 保持原曲伴奏响度。")
-                    refine = gr.Checkbox(label="精细处理主唱", value=defaults[6], interactive=refine_ready,
-                                         info="先分离主唱并去除混响，减少和声干扰。处理时间稍长。" if refine_ready
-                                         else "请先安装主唱分离与去混响模型。")
-                    index_rate = gr.Slider(0, 1, value=defaults[7], step=0.05, label="音色检索强度",
-                                           info="越高越贴近训练录音，但可能影响咬字；建议从 0.25 开始。")
+                    with gr.Column(elem_id="basic-voice-settings", min_width=0):
+                        gr.HTML('<h3 class="settings-group-title">人声适配</h3>', container=False)
+                        pitch_mode = gr.Radio(choices=RANGE_CHOICES, value=defaults[0], label="音域适配",
+                                              info="自动模式只在原唱明显超出你的录音音域时，将人声降低一个八度；伴奏保持原调。")
+                        backing = gr.Radio(choices=BACKING_CHOICES, value=defaults[1], label="和声处理",
+                                           info="保留原唱和声通常更自然，主唱仍会转换为你的声音。")
+                        clarity = gr.Slider(0, 1, value=defaults[2], step=0.05, label="人声清晰度",
+                                            info="歌词不清楚可调高；声音偏尖、偏薄可调低。")
+                    with gr.Accordion("混音与精细调节", open=False, elem_id="advanced-voice-settings"):
+                        gr.HTML('<p class="field-note">只在需要时调整。人声和伴奏响度分别控制，0 表示保持原曲响度。</p>',
+                                container=False)
+                        reverb = gr.Slider(0, 2, value=defaults[3], step=0.1, label="混响", info="1 接近原曲的空间感，0 不添加混响。")
+                        with gr.Row():
+                            vocal_gain = gr.Slider(-12, 12, value=defaults[4], step=0.5, label="人声音量（dB）", info="0 保持原曲人声响度。")
+                            music_gain = gr.Slider(-12, 12, value=defaults[5], step=0.5, label="伴奏音量（dB）", info="0 保持原曲伴奏响度。")
+                        refine = gr.Checkbox(label="精细处理主唱", value=defaults[6], interactive=refine_ready,
+                                             info="先分离主唱并去除混响，减少和声干扰。处理时间稍长。" if refine_ready
+                                             else "请先安装主唱分离与去混响模型。")
+                        index_rate = gr.Slider(0, 1, value=defaults[7], step=0.05, label="音色检索强度",
+                                               info="越高越贴近训练录音，但可能影响咬字；建议从 0.25 开始。")
+                    reset_settings = gr.Button("恢复默认设置", elem_id="reset-cover", size="sm")
                 settings_summary = gr.Markdown(
                     _settings_summary(*defaults), elem_id="cover-settings-summary")
-                with gr.Row(elem_id="cover-settings-actions"):
-                    reset_settings = gr.Button("恢复默认", elem_id="reset-cover", size="sm")
-                    start = gr.Button(voice_button["value"] if isinstance(voice_button, dict) else "开始翻唱",
-                                      variant="primary", elem_id="start-cover", size="lg",
-                                      interactive=voice_button.get("interactive", True) if isinstance(voice_button, dict) else True)
-                gr.HTML('<p class="field-note local-note">音频在本机处理 · 成品自动保存到作品库</p>', container=False)
-        with gr.Column(elem_id="cover-output", elem_classes="studio-panel", scale=6, min_width=320):
-            gr.HTML('<div class="panel-heading"><span class="eyebrow">02 <i>/</i> MONITOR</span>'
-                    '<h2>制作与试听</h2></div>', container=False)
-            empty = gr.HTML('<div class="empty-studio"><div class="record-art" aria-hidden="true">'
-                            '<span class="platter"></span><span class="sleeve"><b>SIDE A</b><i>VOICE<br>EDITION</i></span></div>'
-                            '<div class="empty-copy"><h3>等待第一轨</h3>'
-                            '<p>选好歌曲和音色，点击「开始翻唱」。<br>这里会显示制作进度，完成后即可试听。</p></div></div>',
-                            elem_id="cover-empty", container=False)
+        with gr.Column(elem_id="cover-output", elem_classes=["studio-panel", "tool-card", "side-panel"], scale=6, min_width=320):
+            gr.HTML('<h2 class="panel-title">制作与试听</h2>', elem_id="monitor-heading", container=False)
+            with gr.Column(elem_id="cover-empty") as empty:
+                preparation = gr.HTML(_cover_preparation(None, selected_voice), elem_id="monitor-preparation",
+                                      container=False)
+                recent = gr.HTML(_recent_cover_preview, elem_id="monitor-audition", container=False)
             with gr.Column(visible=False, elem_id="cover-stage") as stage:
                 progress = _progress_view("cover-progress")
             # Keep control visibility independent from the stage container;
@@ -661,9 +744,14 @@ def _cover_tab():
             stop = gr.Button("停止任务", elem_id="stop-cover", size="sm", visible=False)
             result = gr.HTML("", visible=False, elem_id="cover-result", container=False)
             again = gr.Button("继续制作", elem_id="again", visible=False)
-    refresh_voice.click(_refresh_voices_ui, outputs=[model, voice_notice_view, start], queue=False, show_progress="hidden")
-    model.change(_cover_voice_change, inputs=[model], outputs=[voice_notice_view, start],
-                 queue=False, show_progress="hidden")
+    gr.on([song.change, model.change], _cover_preparation, inputs=[song, model], outputs=[preparation],
+          queue=False, show_progress="hidden", api_name=False)
+    if cover_tab is not None:
+        cover_tab.select(_recent_cover_preview, outputs=[recent], queue=False, show_progress="hidden", api_name=False)
+    task_id = gr.BrowserState("", storage_key="aicoversong-cover-task")
+    refresh_voice.click(_refresh_voices, outputs=[model], queue=False, show_progress="hidden")
+    gr.on([song.change, model.change], _cover_input_change, inputs=[song, model, task_id],
+          outputs=[voice_notice_view, blocked_reason, start], queue=False, show_progress="hidden", api_name=False)
     settings_inputs = [pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate]
     for control in settings_inputs:
         control.change(_settings_summary, inputs=settings_inputs, outputs=[settings_summary],
@@ -671,22 +759,22 @@ def _cover_tab():
     reset_settings.click(lambda: (*_default_cover_settings(refine_ready), _settings_summary(*_default_cover_settings(refine_ready))),
                          outputs=settings_inputs + [settings_summary], queue=False, show_progress="hidden")
     outputs = [progress, form, stage, result, again, start, stop, empty]
-    task_id = gr.BrowserState("", storage_key="aicoversong-cover-task")
     poll = gr.Timer(1.0, active=False)
     start.click(_start_cover,
                 inputs=[song, model, pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate, task_id],
                 outputs=outputs + [task_id, poll], queue=False, trigger_mode="multiple", show_progress="hidden",
                 api_name="cover")
-    poll.tick(_poll_cover, inputs=[task_id], outputs=outputs + [poll], queue=False,
+    poll.tick(_poll_cover, inputs=[task_id, blocked_reason], outputs=outputs + [poll], queue=False,
               show_progress="hidden", api_name="cover_status")
     # BrowserState contains only this browser's opaque task token. It restores
     # the status after a page refresh without exposing another session's job.
-    task_id.change(_poll_cover, inputs=[task_id], outputs=outputs + [poll], queue=False,
+    task_id.change(_poll_cover, inputs=[task_id, blocked_reason], outputs=outputs + [poll], queue=False,
                    show_progress="hidden", api_name=False)
-    stop.click(_stop_cover, inputs=[task_id], outputs=outputs + [poll], queue=False,
+    stop.click(_stop_cover, inputs=[task_id, blocked_reason], outputs=outputs + [poll], queue=False,
                show_progress="hidden", api_name="stop_cover")
-    again.click(_again, inputs=[task_id], outputs=outputs + [task_id, poll], queue=False,
-                show_progress="hidden", api_name=False)
+    again.click(_again, inputs=[task_id, blocked_reason], outputs=outputs + [task_id, poll], queue=False,
+                show_progress="hidden", api_name=False).then(
+                    _recent_cover_preview, outputs=[recent], queue=False, show_progress="hidden", api_name=False)
     return model
 
 
@@ -702,19 +790,80 @@ def _cover_tab():
 # itself is out of its reach; voice_recording._inspect_audio reports that case
 # when a take is saved.
 RAW_MICROPHONE_JS = """
-(() => {
-  const devices = navigator.mediaDevices;
-  if (!devices || devices.__coverRawMicrophone) return;
+const notice = element.querySelector('.mic-device-warning');
+const message = notice.querySelector('.mic-device-message');
+const retry = notice.querySelector('button');
+const devices = navigator.mediaDevices;
+const reasons = {
+  NotFoundError: '没有可用的麦克风。请连接设备，并在 Windows 声音设置中启用输入设备。',
+  NotAllowedError: '麦克风访问受限。请检查浏览器站点权限和 Windows 麦克风隐私设置。',
+  SecurityError: '请用本机地址或 HTTPS 打开页面，并检查浏览器的麦克风权限。',
+  NotReadableError: '麦克风无法读取。请检查设备连接，或关闭占用麦克风的程序后重试。',
+  AbortError: '录音启动中断。请检查麦克风连接后重试。',
+  UnknownError: '暂时无法检查麦克风。请检查设备和浏览器权限后重试。'
+};
+function show(reason) {
+  message.textContent = reason ? (reasons[reason] || reasons.UnknownError) : '';
+  notice.hidden = !reason;
+  retry.removeAttribute('aria-busy');
+  retry.disabled = false;
+}
+if (!devices || !devices.getUserMedia) {
+  show('SecurityError');
+  retry.hidden = true;
+  return;
+}
+
+// Stop subscriptions from an earlier mount if Gradio reconstructs this tab.
+window.__coverMicSubscriptions?.abort();
+const controller = new AbortController();
+window.__coverMicSubscriptions = controller;
+const options = {signal: controller.signal};
+let revision = 0;
+let permission;
+async function inspect() {
+  const check = ++revision;
+  retry.disabled = true;
+  retry.setAttribute('aria-busy', 'true');
+  let reason = '';
+  try {
+    if (permission?.state === 'denied') reason = 'NotAllowedError';
+    else if (!(await devices.enumerateDevices()).some(device => device.kind === 'audioinput')) reason = 'NotFoundError';
+  } catch (error) {
+    reason = error.name || 'UnknownError';
+  }
+  if (check === revision && !controller.signal.aborted) show(reason);
+}
+
+if (!devices.__coverRawMicrophone) {
   const original = devices.getUserMedia.bind(devices);
-  devices.getUserMedia = (constraints) => {
-    if (constraints && constraints.audio) {
-      const audio = constraints.audio === true ? {} : {...constraints.audio};
-      constraints = {...constraints, audio: {...audio, noiseSuppression: false,
-                                             echoCancellation: false, autoGainControl: false}};
+  devices.getUserMedia = async (constraints) => {
+    if (!constraints?.audio) return original(constraints);
+    const audio = constraints.audio === true ? {} : constraints.audio;
+    try {
+      const stream = await original({...constraints, audio: {...audio,
+        noiseSuppression: false, echoCancellation: false, autoGainControl: false}});
+      window.dispatchEvent(new CustomEvent('cover-mic-capture', {detail: ''}));
+      return stream;
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('cover-mic-capture', {detail: error.name || 'UnknownError'}));
+      throw error;
     }
-    return original(constraints);
   };
   devices.__coverRawMicrophone = true;
+}
+window.addEventListener('cover-mic-capture', event => {
+  revision++;
+  show(event.detail);
+}, options);
+devices.addEventListener('devicechange', inspect, options);
+retry.addEventListener('click', inspect, options);
+(async () => {
+  try { permission = await navigator.permissions?.query({name: 'microphone'}); }
+  catch { /* Some browsers support capture but omit microphone from the Permissions API. */ }
+  if (controller.signal.aborted) return;
+  permission?.addEventListener('change', inspect, options);
+  if (!revision) await inspect();
 })();
 """
 
@@ -781,8 +930,11 @@ def _take_action_state(audio_path):
     enabled = bool(audio_path)
     return (gr.update(interactive=enabled), gr.update(interactive=enabled),
             gr.update(interactive=enabled), gr.update(interactive=enabled),
-            _studio_alert_html("已录好这一段。先试听，满意后保存；不满意可以重录。" if enabled
-                               else "点击麦克风录音，读完后先试听，满意再保存。", "info"))
+            _studio_alert_html("录音已就绪，可以试听、保存或重录。", "info") if enabled else "")
+
+
+def _recording_started():
+    return _studio_alert_html("正在录音。读完或唱完后点停止，再试听确认。", "info")
 
 
 def _preview_take(audio_path):
@@ -840,18 +992,20 @@ def _train_worker(agreed):
 def _voice_tab():
     initial = recorder.initial_index()
     count = gr.State(initial)
-    gr.HTML('<div class="panel-heading"><span class="eyebrow">VOICE / 我的声音</span>'
-            '<h2>录下真实的你</h2><p>按稿件提示朗读或清唱，试听满意后保存。可以分几次完成。</p></div>', container=False)
+    gr.HTML('<header class="page-hero"><h1>录音与<span>训练</span></h1></header>',
+            container=False, apply_default_css=False)
     summary = gr.HTML(_voice_summary(), elem_id="voice-tally", container=False)
     with gr.Row(elem_id="voice-workspace", equal_height=False):
         with gr.Column(elem_id="voice-script", scale=6, min_width=320):
-            prompt = gr.HTML(recorder.prompt_markdown(initial), elem_id="cover-recording-prompt", container=False,
-                             js_on_load=RAW_MICROPHONE_JS)
-        with gr.Column(elem_id="voice-recorder", elem_classes="studio-panel", scale=4, min_width=300):
-            gr.HTML('<div class="panel-heading"><span class="eyebrow">录音台</span>'
-                    '<h3>先录制，再试听</h3><p>只读或唱稿件正文，不需要读操作说明。</p></div>', container=False)
+            prompt = gr.HTML(recorder.prompt_markdown(initial), elem_id="cover-recording-prompt", container=False)
+        with gr.Column(elem_id="voice-recorder", elem_classes=["studio-panel", "tool-card", "recorder-card"], scale=4, min_width=300):
+            gr.HTML('<div class="panel-head"><h3 class="panel-title">录音控制</h3></div>', container=False)
             recording = gr.Audio(label="麦克风录音", sources=["microphone"], type="filepath", format="wav",
                                  recording=False, interactive=True, editable=False, elem_id="cover-mic-recorder", buttons=[])
+            gr.HTML('<div class="studio-alert mic-device-warning" data-tone="warning" hidden>'
+                    '<span class="mic-device-message" role="status"></span>'
+                    '<button class="mic-retry" type="button">重新检测</button></div>',
+                    elem_id="mic-device-status", container=False, apply_default_css=False, js_on_load=RAW_MICROPHONE_JS)
             with gr.Row(elem_id="take-actions"):
                 preview = gr.Button("试听", elem_id="take-preview", size="sm", interactive=False)
                 retake = gr.Button("重录", elem_id="take-retake", size="sm", interactive=False)
@@ -859,8 +1013,7 @@ def _voice_tab():
             with gr.Row(elem_id="take-next"):
                 skip = gr.Button("跳过本条", elem_id="take-skip")
                 save = gr.Button("保存并继续", elem_id="take-save", variant="primary", interactive=False)
-            feedback = gr.HTML(_studio_alert_html("点击麦克风录音，读完后先试听，满意再保存。", "info"),
-                               elem_id="take-feedback", container=False)
+            feedback = gr.HTML("", elem_id="take-feedback", container=False)
             with gr.Accordion("录音小贴士", open=False, elem_id="record-tips"):
                 gr.Markdown(
                     "- 安静房间，嘴离麦克风约一拳，保持距离。\n"
@@ -870,7 +1023,7 @@ def _voice_tab():
                     "- 清唱保持舒适音域，高音专项也不要勉强或喊叫。\n"
                     "- 已保存的片段会保留，下次可继续补录。"
                 )
-    gr.HTML('<h2 class="section-title">训练</h2>'
+    gr.HTML('<h2 class="section-title">训练音色</h2>'
             '<p class="section-lead">用已保存的录音训练个人音色。耗时取决于显卡与录音量，训练期间请保持电脑唤醒。'
             '已有音色会保留。</p>', container=False)
     with gr.Column(elem_id="train-form") as train_form:
@@ -884,6 +1037,7 @@ def _voice_tab():
 
     recording.clear(_clear_take, inputs=[count],
                     outputs=[recording, prompt, preview, retake, clear, save, feedback], queue=False)
+    recording.start_recording(_recording_started, outputs=[feedback], queue=False, show_progress="hidden")
     recording.change(_take_action_state, inputs=[recording], outputs=[preview, retake, clear, save, feedback],
                      queue=False, show_progress="hidden")
     preview.click(_preview_take, inputs=[recording], outputs=[feedback], queue=False, show_progress="hidden",
@@ -954,7 +1108,7 @@ def _history_html(rows, total, selected=None):
             f'<button type="button" class="history-pick" data-work="{html.escape(row["run_id"], quote=True)}" '
             f'aria-label="管理：{name}" aria-controls="history-inspector" aria-expanded="{active_attr}">'
             f'{"收起" if active else "管理"}</button></div>'
-            + _track(row["cover"], f'{row["title"]} 翻唱.wav').replace('preload="metadata"', 'preload="none"') + "</li>")
+            + _track(row["cover"], f'{row["title"]} 翻唱.wav', lazy=True) + "</li>")
     return (f'<p class="history-note" role="status">显示 {len(rows)} / {total} 首作品</p>'
             '<ul class="history" aria-label="作品列表">' + "".join(items) + "</ul>")
 
@@ -1051,8 +1205,8 @@ def _history_tab(history_tab):
     rows = library.list_works(pipeline.OUTPUT)
     trashed = _trash_choices()
     selected = gr.State(None)
-    gr.HTML('<header class="panel-heading history-heading"><span class="eyebrow">作品库 / LIBRARY</span>'
-            '<h2>我的作品</h2><p>试听与下载成品，或为一首歌制作新的混音版本。</p></header>', container=False)
+    gr.HTML('<header class="page-hero"><h1>我的<span>作品库</span></h1></header>',
+            container=False, apply_default_css=False)
     with gr.Row(elem_id="history-toolbar"):
         with gr.Row(elem_id="history-filter-controls", visible=bool(rows)) as filters:
             search = gr.Textbox(label="搜索作品", placeholder="输入歌名或源文件名", show_label=True,
@@ -1074,7 +1228,7 @@ def _history_tab(history_tab):
             view = gr.HTML(_history_html(rows[:60], len(rows)), elem_id="history-view", container=False,
                            js_on_load=_HISTORY_PICK_JS)
         with gr.Column(scale=1, min_width=280, visible=False,
-                       elem_id="history-inspector", elem_classes="studio-panel") as inspector:
+                       elem_id="history-inspector", elem_classes=["studio-panel", "tool-card", "inspector-card"]) as inspector:
             selection_note = gr.HTML("", elem_id="history-selection-note", container=False)
             title = gr.Textbox(label="作品名称", value="", placeholder="输入新的作品名称", elem_id="history-title")
             with gr.Row(elem_id="history-basic-actions"):
@@ -1110,8 +1264,10 @@ def _history_tab(history_tab):
 
 def applio_plugin():
     with gr.Tabs(elem_id="main-tabs") as tabs:
-        with gr.Tab("创作工作台", id="cover"):
-            model = _cover_tab()
+        with gr.Tab("创作工作台", id="cover") as cover_tab:
+            gr.HTML('<header class="page-hero"><h1>个人声音<span>翻唱工作台</span></h1></header>',
+                    container=False, apply_default_css=False)
+            model = _cover_tab(cover_tab)
         with gr.Tab("我的声音", id="voice"):
             training = _voice_tab()
         with gr.Tab("作品库", id="history") as history_tab:

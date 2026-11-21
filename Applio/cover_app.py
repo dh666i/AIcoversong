@@ -77,10 +77,11 @@ except Exception:   # a different Gradio: the page works as before, only without
     pass
 
 ROOT = pathlib.Path(now_dir).parent
-CSS = (pathlib.Path(now_dir) / "assets" / "ui" / "cover.css").read_text(encoding="utf-8")
+UI_ASSETS = pathlib.Path(now_dir) / "assets" / "ui"
+CSS = "\n".join((UI_ASSETS / name).read_text(encoding="utf-8") for name in ("cover.css", "cover-controls.css"))
 THEME = gr.themes.Base(
-    primary_hue="emerald", secondary_hue="slate", neutral_hue="slate",
-    font=["Microsoft YaHei UI", "PingFang SC", "sans-serif"], font_mono=["Consolas", "monospace"],
+    primary_hue="lime", secondary_hue="cyan", neutral_hue="zinc",
+    font=["system-ui", "Microsoft YaHei", "sans-serif"], font_mono=["Consolas", "monospace"],
 )
 # Gradio words its own buttons ("Record", "Stop", "Download" ...) in the browser's language.
 # This page is Chinese whatever the browser is set to, so tell Gradio the browser is Chinese.
@@ -95,37 +96,148 @@ document.documentElement.lang = 'zh-CN';
 document.addEventListener('play', (event) => {
   document.querySelectorAll('audio').forEach((audio) => { if (audio !== event.target) audio.pause(); });
 }, true);
+const setAudioStatus = (audio, state, message) => {
+  const track = audio.closest('.track');
+  if (!track) return;
+  track.dataset.audioState = state;
+  const status = track.querySelector('.track-message');
+  if (status) status.textContent = message;
+};
+const clearAudioTimer = (audio) => {
+  if (audio.__coverLoadTimer) window.clearTimeout(audio.__coverLoadTimer);
+  audio.__coverLoadTimer = 0;
+};
+const watchAudioLoad = (audio) => {
+  clearAudioTimer(audio);
+  audio.__coverLoadTimer = window.setTimeout(() => {
+    if (audio.readyState < 1 && !audio.error) {
+      setAudioStatus(audio, 'idle', '点击播放后继续读取，或下载音频文件');
+    }
+  }, 6000);
+};
+const bindAudioStates = () => {
+  document.querySelectorAll('audio').forEach((audio) => {
+    if (audio.dataset.stateBound === 'true') return;
+    audio.dataset.stateBound = 'true';
+    if (audio.dataset.lazy === 'true') {
+      setAudioStatus(audio, 'idle', '点击播放后加载音频');
+      audio.addEventListener('play', () => {
+        if (audio.dataset.loadingStarted === 'true') return;
+        audio.dataset.loadingStarted = 'true';
+        setAudioStatus(audio, 'loading', '正在读取音频信息…');
+        audio.load();
+        audio.play().catch(() => {});
+      }, {once: true});
+    } else {
+      setAudioStatus(audio, 'loading', '正在读取音频信息…');
+    }
+    if (audio.dataset.lazy !== 'true') watchAudioLoad(audio);
+    audio.addEventListener('loadstart', () => {
+      setAudioStatus(audio, 'loading', '正在读取音频信息…');
+      watchAudioLoad(audio);
+    });
+    audio.addEventListener('loadedmetadata', () => {
+      clearAudioTimer(audio);
+      audio.dataset.lazy = 'false';
+      setAudioStatus(audio, 'ready', '');
+    });
+    audio.addEventListener('canplay', () => {
+      clearAudioTimer(audio);
+      setAudioStatus(audio, 'ready', '');
+    });
+    audio.addEventListener('error', () => {
+      clearAudioTimer(audio);
+      setAudioStatus(audio, 'error', '音频暂时无法读取。请重试，或用右侧按钮下载文件。');
+      const retry = audio.closest('.track')?.querySelector('.track-retry');
+      if (retry) retry.hidden = false;
+    });
+  });
+  document.querySelectorAll('.track-retry').forEach((button) => {
+    if (button.dataset.bound === 'true') return;
+    button.dataset.bound = 'true';
+    button.addEventListener('click', () => {
+      const audio = button.closest('.track')?.querySelector('audio');
+      if (!audio) return;
+      button.hidden = true;
+      audio.dataset.loadingStarted = 'false';
+      audio.dataset.lazy = 'false';
+      audio.preload = 'metadata';
+      setAudioStatus(audio, 'loading', '正在重新读取音频信息…');
+      watchAudioLoad(audio);
+      audio.load();
+    });
+  });
+};
+const audioObserver = new MutationObserver(bindAudioStates);
+const observeAudio = () => {
+  if (document.body) audioObserver.observe(document.body, {childList: true, subtree: true});
+  bindAudioStates();
+};
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', observeAudio, {once: true});
+} else {
+  observeAudio();
+}
+const controlButtons = '.gr-accordion > button.label-wrap, .tab-like-container > .reset-button, #song-drop button.center';
+function labelControl(button) {
+  if (button.classList.contains('label-wrap')) {
+    button.setAttribute('aria-expanded', String(button.classList.contains('open')));
+    const panel = button.nextElementSibling;
+    if (panel?.matches('[data-testid="accordion-content"]') && button.parentElement.id) {
+      panel.id = button.parentElement.id + '-content';
+      button.setAttribute('aria-controls', panel.id);
+    }
+    button.querySelector('.icon')?.setAttribute('aria-hidden', 'true');
+  } else if (button.classList.contains('reset-button')) {
+    const slider = button.closest('.wrap');
+    const label = slider?.querySelector('.head label [data-testid="block-info"]')?.textContent.trim();
+    if (!label) return;
+    button.title = '恢复' + label + '默认值';
+    button.setAttribute('aria-label', button.title);
+    slider.querySelector('input[type="number"]')?.setAttribute('aria-label', label + '数值');
+    slider.querySelector('input[type="range"]')?.setAttribute('aria-label', label);
+  } else {
+    button.setAttribute('aria-label', '选择音频文件，也可以拖放文件');
+  }
+}
+function labelNewControls(element) {
+  if (!(element instanceof Element)) return;
+  if (element.matches(controlButtons)) labelControl(element);
+  element.querySelectorAll(controlButtons).forEach(labelControl);
+}
+const observeControlLabels = () => {
+  labelNewControls(document.body);
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'childList') record.addedNodes.forEach(labelNewControls);
+      else if (record.target.matches('.gr-accordion > button.label-wrap')) labelControl(record.target);
+    }
+  }).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']});
+};
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', observeControlLabels, {once: true});
+} else {
+  observeControlLabels();
+}
 </script>"""
 
 _WAVE_MARK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 10v4m4-8v12m5-15v18m5-15v12m4-8v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
-_GITHUB_MARK = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.2.8-.6v-2.2c-3.2.7-3.9-1.3-3.9-1.3-.5-1.3-1.3-1.7-1.3-1.7-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.1 1.2a10.8 10.8 0 0 1 5.8 0c2.1-1.5 3.1-1.2 3.1-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.1v3.3c0 .4.2.7.8.6A11.4 11.4 0 0 0 12 .8Z"/></svg>'
-_GROOVES = "".join(
-    f'<path d="M-16,{88+n:.1f} C50,{90+n:.1f} 66,{25+n*.32:.1f} 127,{27+n*.8:.1f} '
-    f'S206,{149-n*.64:.1f} 274,{113-n*.95:.1f} S352,{-20+n*.63:.1f} 427,{61+n:.1f} '
-    f'S522,{98+n*.46:.1f} 575,{33+n*.32:.1f}"/>' for n in range(-46, 47, 3)
-)
-_SIGNAL = f'''<svg class="groove-art" width="560" height="144" viewBox="0 0 560 144" fill="none" aria-hidden="true">
-  <defs><linearGradient id="groove-ink" x1="0" y1="84" x2="560" y2="48" gradientUnits="userSpaceOnUse">
-  <stop stop-color="#7966bf"/><stop offset=".28" stop-color="#c7a4fd"/><stop offset=".53" stop-color="#afa9ff"/>
-  <stop offset=".78" stop-color="#8be5dc"/><stop offset="1" stop-color="#61988f"/></linearGradient></defs>
-  <g stroke="url(#groove-ink)" stroke-width="1">{_GROOVES}</g></svg>'''
-MASTHEAD = f'''<header id="masthead">
-  <div class="brand" aria-label="AIcoversong"><span class="brand-mark">{_WAVE_MARK}</span><span class="brand-name"><span>AI</span>coversong</span><span class="brand-label">个人声音工作室</span></div>
-  <nav class="head-links" aria-label="项目链接"><span class="local-badge"><i aria-hidden="true"></i>本地创作</span><a class="repo-link" href="https://github.com/dh666i/AIcoversong" target="_blank" rel="noopener noreferrer">{_GITHUB_MARK}<span>GitHub</span></a></nav>
-</header>
-<section class="studio-hero" aria-label="个人翻唱工作室">
-  <div class="hero-copy"><p class="studio-eyebrow"><i aria-hidden="true"></i> COVER STUDIO <span>/</span> 声音创作</p><h1>喜欢的歌，<em>你的声音。</em></h1><p>用自己的音色翻唱，再细听每一轨。</p></div>
-  <div class="groove-plate" aria-hidden="true">{_SIGNAL}<div class="groove-legend"><span>FIG. 01</span><i></i><span>VOICEPRINT</span></div></div>
-</section>'''
-FOOTER = '''<footer class="studio-footer"><span>AIcoversong · 用自己的声音，唱喜欢的歌。</span><div class="footer-links"><span>基于 <a href="https://github.com/IAHispano/Applio" target="_blank" rel="noopener noreferrer">Applio / RVC</a></span><a href="https://github.com/dh666i/AIcoversong#readme" target="_blank" rel="noopener noreferrer">使用文档</a><a href="https://github.com/dh666i/AIcoversong/issues" target="_blank" rel="noopener noreferrer">反馈问题</a></div></footer>'''
+MASTHEAD = f'''<header class="studio-bar">
+  <span class="studio-brand"><span class="studio-symbol">{_WAVE_MARK}</span>AIcoversong</span>
+  <a class="engine-location" href="https://github.com/dh666i/AIcoversong" target="_blank" rel="noopener noreferrer">
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6m0-6L10 14"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+    GitHub 仓库
+  </a>
+</header>'''
+FOOTER = '''<footer class="studio-footer"><span>声音引擎 · <a href="https://github.com/IAHispano/Applio" target="_blank" rel="noopener noreferrer">Applio / RVC</a></span><nav class="footer-links" aria-label="项目资源"><a href="https://github.com/dh666i/AIcoversong#readme" target="_blank" rel="noopener noreferrer">使用文档</a><a href="https://github.com/dh666i/AIcoversong/issues" target="_blank" rel="noopener noreferrer">反馈问题</a><a href="https://github.com/dh666i/AIcoversong" target="_blank" rel="noopener noreferrer">GitHub</a></nav></footer>'''
 
 # delete_cache: the page copies every result it shows into cache/gradio. The originals stay in
 # output/, so copies older than a day are removed once an hour (they had grown to 7 GB).
 with gr.Blocks(title="AIcoversong · 个人声音工作室", delete_cache=(3600, 86400), analytics_enabled=False) as page:
     with gr.Column(elem_id="page"):
-        gr.HTML(MASTHEAD, container=False)
+        gr.HTML(MASTHEAD, elem_id="studio-masthead", container=False, apply_default_css=False)
         applio_plugin()
-        gr.HTML(FOOTER, container=False)
+        gr.HTML(FOOTER, elem_id="studio-resources", container=False, apply_default_css=False)
 
 
 def main() -> None:

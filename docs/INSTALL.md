@@ -41,6 +41,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup.ps1 -DownloadMod
 
 安装完成后，正常本地录音/翻唱不需要远端推理 API。不要把没有身份验证的本地网页直接开放到公网。
 
+## 更新已有安装
+
+1. 等当前翻唱或训练结束，保存需要的录音，然后双击 `关闭翻唱.bat`。
+2. **Git 安装**：在项目根目录运行 `git pull --ff-only`。**ZIP 安装**：将[最新版源码包](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip)解压到临时目录，把解出的 `AIcoversong` 文件夹里的内容合并到原安装目录，替换同名源码。保留原目录中的录音、作品、训练模型、环境和本机配置。
+3. 双击原安装目录中的 `启动翻唱.bat`。如果浏览器里还开着旧标签页，刷新 `http://127.0.0.1:6969`。启动器会复用已经运行的服务，所以更新源码后需要重新启动服务才能载入新界面。
+
 ## 录音和音色
 
 网页的「我的声音」提供朗读与清唱稿。录完后试听并保存，累计足够干净的录音再开始训练。训练会使用当前已保存的数据，不会附送作者个人音色。
@@ -54,7 +60,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup.ps1 -DownloadMod
 | `uv` 找不到 | 安装后重新打开终端，运行 `uv --version` |
 | CUDA 不可用 | 在 `env` 内检查 `torch.cuda.is_available()`，确认 NVIDIA 驱动和官方 cu128 依赖安装成功 |
 | 模型缺失 | 运行 `env\Scripts\python.exe tools/download_assets.py --check`，按输出补齐 |
-| 麦克风无权限 | 用 localhost 页面，允许浏览器使用麦克风；停止录音后再试听 |
+| 麦克风不可用 | 打开本机页面，按「我的声音」里的提示检查设备连接、Windows 输入和麦克风隐私设置、浏览器站点权限，或关闭占用设备的程序。点「重新检测」后再录音 |
 | 端口被占用 | 关闭旧服务或检查 6969 上的进程，不要反复启动多个实例 |
 | Windows 页面文件不足 | 关闭其他占内存程序并检查系统页面文件；录音预处理已使用保守并发 |
 | 效果有电音、错字 | 检查输入和声/混响、分离主唱与干净录音覆盖；训练更多轮并不保证更好 |
