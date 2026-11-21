@@ -50,9 +50,10 @@ BACKING_MODES = ("original", "convert", "remove")
 #   down    always one octave down
 RANGE_MODES = ("auto", "keep", "down")
 STAGE_LABELS = {"separate": "分离人声与伴奏", "refine": "分出主唱、去掉混响",
+                "duet": "分开对唱声部",
                 "convert": "换成你的声音", "mix": "处理人声并合成"}
 # Rough share of the total time each stage takes (measured on six songs of 3.5-5.5 minutes).
-STAGE_WEIGHTS = {"separate": 0.60, "refine": 0.25, "convert": 0.10, "mix": 0.05}
+STAGE_WEIGHTS = {"separate": 0.60, "refine": 0.25, "duet": 0.30, "convert": 0.10, "mix": 0.05}
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -193,6 +194,7 @@ def _tail(path: Path, length: int = 2600) -> str:
 
 _BAR = re.compile(rb"(\d+)/(\d+) \[")
 _CHUNKS = re.compile(r"(主唱|和声)：已转换 (\d+)/(\d+) 段".encode("utf-8"))
+_DUET_CHUNKS = re.compile(rb"duet-pass (\d+)/(\d+) chunks (\d+)/(\d+)")
 _HALF = "第 2/2 步".encode("utf-8")
 _TWO_PASSES = "本步共 2 遍转换".encode("utf-8")   # printed by the convert worker before its first pass
 _LEAD, _BACKING = "主唱".encode("utf-8"), "和声".encode("utf-8")
@@ -219,7 +221,7 @@ def stage_fraction(stage: str, log_path: Path) -> float:
         done, total = int(found[-1][0]), int(found[-1][1])
         return min(1.0, done / total) if total else 0.0
 
-    if stage == "separate":
+    if stage in ("separate", "duet"):
         return last(tail)
     if stage == "refine":  # two models in a row, each about half of the stage
         if _HALF not in head and _HALF not in tail:
@@ -227,6 +229,10 @@ def stage_fraction(stage: str, log_path: Path) -> float:
         position = tail.rfind(_HALF)
         return 0.5 + 0.5 * last(tail[position:] if position >= 0 else tail)
     if stage == "convert":  # loading the model (about a third of the stage), the lead, then perhaps the backing stem
+        duet = _DUET_CHUNKS.findall(data)
+        if duet:
+            i, n, done_chunks, total = map(int, duet[-1])
+            return (i + done_chunks / max(total, 1)) / n
         if "本步共".encode("utf-8") not in data:
             return 0.0
         done = {_LEAD: 0.0, _BACKING: 0.0}
@@ -240,7 +246,7 @@ def stage_fraction(stage: str, log_path: Path) -> float:
 def _run_stage(stage: str, run: Path):
     """Yield (fraction, seconds) while a worker owns the GPU, then fully exit that worker."""
     log_path = run / f"{stage}.log"
-    uses_separator = stage in ("separate", "refine")
+    uses_separator = stage in ("separate", "refine", "duet")
     interpreter = ROOT / "separator-env" / "Scripts" / "python.exe" if uses_separator else Path(sys.executable)
     if not interpreter.is_file():
         raise FileNotFoundError(f"人声分离环境尚未安装完整，缺少：{interpreter}。请先完成 AICover 依赖安装。")
@@ -283,7 +289,8 @@ def _run_stage(stage: str, run: Path):
                     pass
 
 
-RESULT_FILES = ("mix", "converted", "vocals", "instrumental", "lead", "backing")
+RESULT_FILES = ("mix", "converted", "vocals", "instrumental", "lead", "backing",
+                "duet_male", "duet_female", "duet_male_converted", "duet_female_converted", "duet_preserved")
 
 
 def _progress(stages: list[str], index: int, fraction: float, seconds: float, started: float, **extra) -> dict:
@@ -298,7 +305,9 @@ def _progress(stages: list[str], index: int, fraction: float, seconds: float, st
 
 def run_cover(song, model=None, index=NO_INDEX, pitch=0, index_rate=0.25,
               vocal_gain=0, instrumental_gain=0, separate_only=False,
-              refine=True, backing="original", clarity=0.75, reverb=1.0, voice_range="auto"):
+              refine=True, backing="original", clarity=0.75, reverb=1.0, voice_range="auto",
+              duet_mode="off", duet_swap=False, duet_second_model=None, duet_male_stem=None, duet_female_stem=None,
+              duet_dereverb=False):
     """User-triggered generator; creates a unique run and preserves every stage.
 
     Yields dicts with the result files found so far, ``status`` (one plain sentence)
@@ -315,23 +324,71 @@ def run_cover(song, model=None, index=NO_INDEX, pitch=0, index_rate=0.25,
         raise ValueError("和声处理方式无效，请重新选择。")
     if voice_range not in RANGE_MODES:
         raise ValueError("音区处理方式无效，请重新选择。")
-    use_refine = bool(refine) and not separate_only
+    use_duet = duet_mode != "off"
+    second_model = None
+    sources = {}
+    if use_duet:
+        from duet_mix import ROLES, selected_roles
+
+        selected_roles(duet_mode)
+        if duet_dereverb and not all((UVR_MODELS / name).is_file() for name in (DEREVERB_MODEL, DEREVERB_CONFIG)):
+            raise ValueError("缺少去混响模型，请安装基础模型或关闭对唱声部去混响。")
+        if separate_only:
+            raise ValueError("只分离伴奏时不能指定对唱翻唱。")
+        if bool(duet_male_stem) != bool(duet_female_stem):
+            raise ValueError("使用已有分轨时，请同时上传对齐原曲的男声和女声。")
+        if duet_male_stem:
+            sources = {role: _audio(path) for role, path in zip(ROLES, (duet_male_stem, duet_female_stem))}
+            if any(path.suffix.lower() not in {".wav", ".flac"} for path in sources.values()):
+                raise ValueError("对唱人声分轨请使用 WAV 或 FLAC。")
+            if sources["male"].samefile(sources["female"]):
+                raise ValueError("男声和女声不能使用同一份分轨。")
+        else:
+            from duet_separator import duet_available
+            if not duet_available():
+                raise ValueError("自动分开对唱需要安装双人声分离模型，或上传两条对齐的人声分轨。")
+        if duet_mode == "both" and duet_second_model:
+            second_model = _voice_path(duet_second_model)
+    use_refine = bool(refine) and not separate_only and not use_duet
     if use_refine and not refine_available():
         raise ValueError(f"精细处理所需的模型不完整（{UVR_MODELS}）。请取消勾选“精细处理”，或重新下载模型。")
+    clarity_value = _number(clarity, 0, 1, "人声清晰度")
+    reverb_value = _number(reverb, 0, 2, "混响量")
     run = _new_run()
     source_copy = run / ("source" + source.suffix.lower())
-    shutil.copy2(source, source_copy)
     job = {
         "song": str(source_copy), "original_song": str(source), "run_dir": str(run),
         "model": str(model_path) if model_path else "", "index": selected_index,
         "pitch": pitch_value, "index_rate": rate if selected_index else 0,
         "vocal_gain": vocal_db, "instrumental_gain": instrumental_db,
         "refine": use_refine, "backing": backing if use_refine else "original",
-        "clarity": _number(clarity, 0, 1, "人声清晰度"), "reverb": _number(reverb, 0, 2, "混响量"),
+        "clarity": clarity_value, "reverb": reverb_value,
         "voice_range": voice_range,
     }
-    _write_json(run / "job.json", job)
-    stages = ["separate"] if separate_only else ["separate"] + (["refine"] if use_refine else []) + ["convert", "mix"]
+    try:
+        shutil.copy2(source, source_copy)
+        if use_duet:
+            job.update(duet_mode=duet_mode, duet_swap=bool(duet_swap), duet_sources={}, duet_dereverb=bool(duet_dereverb))
+            if second_model:
+                choices = voice_indices(duet_second_model)
+                job.update(duet_second_model=str(second_model),
+                           duet_second_index=_index_path(choices[1], second_model) if len(choices) > 1 else "",
+                           duet_second_index_rate=rate)
+            for role, path in sources.items():
+                target = run / ("input_" + role + path.suffix.lower())
+                shutil.copy2(path, target)
+                job["duet_sources"][role] = str(target)
+        _write_json(run / "job.json", job)
+    except Exception:
+        shutil.rmtree(run, ignore_errors=True)
+        raise
+    stages = ["separate"]
+    if not separate_only:
+        if use_duet:
+            stages.append("duet")
+        elif use_refine:
+            stages.append("refine")
+        stages.extend(("convert", "mix"))
     started = time.monotonic()
     result = {"status": "准备开始", "vocals": None, "instrumental": None, "converted": None, "mix": None, "files": [],
               "run": str(run), "progress": _progress(stages, 0, 0.0, 0.0, started)}
@@ -347,7 +404,7 @@ def run_cover(song, model=None, index=NO_INDEX, pitch=0, index_rate=0.25,
                 worker.close()   # stopped from the page: the worker is gone before anything else happens
             result.update(_read_json(run / f"{stage}_result.json"))
             result["files"] = [result[k] for k in RESULT_FILES if result.get(k)]
-        notes = [text for text in (result.get("range_note"), result.get("note")) if text]
+        notes = [text for text in (result.get("duet_note"), result.get("range_note"), result.get("note")) if text]
         result["notes"] = notes
         result["status"] = "分离完成" if separate_only else "翻唱完成"
         result["progress"] = {**_progress(stages, len(stages), 1.0, 0.0, started), "state": "done", "notes": notes}
@@ -513,10 +570,34 @@ def _stage_result(run: Path, stage: str) -> dict:
     return _read_json(path) if path.is_file() else {}
 
 
-def _convert(job: dict, run: Path) -> dict:
+def _duet(job: dict, run: Path) -> dict:
+    from duet_mix import prepare_uploaded, selected_roles, write_preserved
+
     separated = _read_json(run / "separate_result.json")
-    refined = _stage_result(run, "refine")
-    model = Path(job["model"]).resolve()
+    if job.get("duet_sources"):
+        stems = prepare_uploaded(job["duet_sources"], separated["vocals"], run, separated.get("stem_gain_db", 0))
+    else:
+        from duet_separator import split_duet
+        stems = split_duet(separated["vocals"], run, swap=job.get("duet_swap", False))
+    stems["duet_preserved"] = write_preserved(stems, job["duet_mode"], run)
+    if job.get("duet_dereverb"):
+        # Strip the room from the input to RVC, retaining aligned originals for mix and audition.
+        for role in selected_roles(job["duet_mode"]):
+            dry_key = f"duet_{role}_dry"
+            wet_key = f"duet_{role}_room"
+            parts, _ = _two_stems(Path(stems[f"duet_{role}"]), DEREVERB_MODEL,
+                                  {"noreverb": dry_key, "reverb": wet_key}, run, dry_key,
+                                  overlap=2, autocast=True)
+            stems[dry_key] = parts[dry_key]
+            Path(parts[wet_key]).unlink()
+    if not job.get("duet_sources"):
+        balance_note = stems.get("duet_balance_note", "")
+        stems["duet_note"] = (balance_note + "已按估计的声部拆分对唱。两人的音区接近、同音合唱或有多人和声时可能串声；"
+                               "可在“分开听”核对。角色反了可交换，局部分错可改用原始人声分轨。")
+    return stems
+
+
+def _load_engine(model: Path, index: str):
     _voice_path(str(model.relative_to(MODEL_ROOT)))
     import torch
 
@@ -526,13 +607,69 @@ def _convert(job: dict, run: Path) -> dict:
         raise ValueError(f"此助手预装 ContentVec，所选模型使用 {embedder}。请在 Applio 推理页选择该模型对应的特征提取器。")
     del metadata
     from vocal_engine import VocalEngine
+    return VocalEngine(str(model), index)
 
+
+def _convert_duet(job: dict, run: Path, stems: dict) -> dict:
+    import gc
+    import soundfile as sf
+    import numpy as np
+    from duet_mix import selected_roles, ROLE_NAMES
+    import vocal_engine
+
+    roles = selected_roles(job["duet_mode"])
+    reports = {}
+    result = {"duet_mode": job["duet_mode"]}
+    ranges = {}
+    engine = None
+    loaded = None
+    for i, role in enumerate(roles):
+        source = stems[f"duet_{role}_dry"] if job.get("duet_dereverb") else stems[f"duet_{role}"]
+        with sf.SoundFile(source) as audio:
+            if not any(np.max(np.abs(block)) > 1e-5 for block in audio.blocks(blocksize=65536, dtype="float32")):
+                raise ValueError(f"没有分离出可转换的{ROLE_NAMES[role]}，请检查或上传对齐的人声分轨。")
+        second = role == "female" and job["duet_mode"] == "both" and job.get("duet_second_model")
+        model = Path(job["duet_second_model"] if second else job["model"]).resolve()
+        index = job["duet_second_index"] if second else job["index"]
+        if loaded != (model, index):
+            del engine
+            gc.collect()
+            engine = _load_engine(model, index)
+            loaded = (model, index)
+        mode = job.get("voice_range", "keep")
+        suggested, fit = (0, {})
+        if mode == "auto":
+            trained = vocal_engine.training_pitch_range(model)
+            if trained:
+                suggested, fit = vocal_engine.suggest_octave(engine.melody(source), trained)
+        octave = -12 if mode == "down" else suggested
+        ranges[role] = {"mode": mode, "octave": octave, "suggested": suggested, **fit}
+        if octave and mode == "auto":
+            result["range_note"] = (result.get("range_note", "") + f"{ROLE_NAMES[role]}已自动降低一个八度。")
+        output = run / f"duet_{role}_converted.wav"
+        def progress(done, total):
+            print(f"duet-pass {i}/{len(roles)} chunks {done}/{total}", flush=True)
+        reports[role] = engine.convert(source, str(output), pitch=int(job["pitch"]) + octave,
+                                       index_rate=job.get("duet_second_index_rate", 0) if second else job["index_rate"],
+                                       protect=0.33, progress=progress)
+        result[f"duet_{role}_converted"] = _output_audio(output, run)
+    result["duet_voice_ranges"] = ranges
+    _write_json(run / "convert_report.json", reports)
+    return result
+
+
+def _convert(job: dict, run: Path) -> dict:
+    if job.get("duet_mode", "off") != "off":
+        return _convert_duet(job, run, _read_json(run / "duet_result.json"))
+    separated = _read_json(run / "separate_result.json")
+    refined = _stage_result(run, "refine")
+    model = Path(job["model"]).resolve()
     def progress(label):
         return lambda done, total: print(f"{label}：已转换 {done}/{total} 段", flush=True)
 
     import vocal_engine
 
-    engine = VocalEngine(str(model), job["index"])
+    engine = _load_engine(model, job["index"])
     output = run / "converted_vocals.wav"
     lead_input = refined.get("lead_dry") or separated["vocals"]
     # A voice model sounds like its speaker only inside the pitch range it was trained on.
@@ -614,6 +751,15 @@ def _mix(job: dict, run: Path) -> dict:
     separated = _read_json(run / "separate_result.json")
     refined = _stage_result(run, "refine")
     converted = _read_json(run / "convert_result.json")
+    if job.get("duet_mode", "off") != "off":
+        from duet_mix import mix_duet
+
+        stems = _read_json(run / "duet_result.json")
+        report = mix_duet({**separated, **stems, **converted}, job["duet_mode"], run,
+                          vocal_gain_db=job["vocal_gain"], music_gain_db=job["instrumental_gain"],
+                          clarity=job["clarity"], dynamics=0.6, reverb=job["reverb"])
+        _write_json(run / "mix_report.json", report)
+        return {"mix": _output_audio(run / "cover.wav", run), "converted": _output_audio(run / "my_vocals.wav", run)}
     backing_mode = job.get("backing", "original")
     output, vocal = run / "cover.wav", run / "my_vocals.wav"
     report = vocal_mix.mix_cover(
@@ -646,7 +792,7 @@ def _mix(job: dict, run: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="AICover isolated audio worker")
-    parser.add_argument("stage", choices=["separate", "refine", "convert", "mix"])
+    parser.add_argument("stage", choices=["separate", "refine", "duet", "convert", "mix"])
     parser.add_argument("job", type=Path)
     args = parser.parse_args()
     job_path = args.job.resolve()
@@ -658,7 +804,7 @@ def main() -> int:
         sys.path.insert(0, str(APPLIO))
         os.environ.update(_environment())
         job = _read_json(job_path)
-        stages = {"separate": _separate, "refine": _refine, "convert": _convert, "mix": _mix}
+        stages = {"separate": _separate, "refine": _refine, "duet": _duet, "convert": _convert, "mix": _mix}
         result = stages[args.stage](job, run)
         _write_json(run / f"{args.stage}_result.json", result)
         return 0

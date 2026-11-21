@@ -17,6 +17,19 @@
 
 Applio 资源 URL 固定到仓库修订；部分分离资源/公共目录 JSON 使用 release 或 upstream URL，文件内容仍由 SHA-256 固定。旧内容不再可下载时应更新清单并复核兼容性，而不是跳过哈希检查。
 
+## 对唱自动分轨（可选）
+
+对唱使用 aufr33 的 Male/Female BS-RoFormer，从已分离的人声估计男声和女声两条轨道。它可同时输出重叠人声；相似音色、假声、同音齐唱、和声和混响可能导致串音或归错轨道。男声与女声是模型的输出标签，建议试听确认，必要时交换分轨或提供自行对齐的人声分轨。
+
+模型与配置合计约 **527 MB**，不计入常规安装的 3.02 GB。在项目根目录运行：
+
+```powershell
+.\env\Scripts\python.exe tools/download_assets.py --duet
+.\env\Scripts\python.exe tools/download_assets.py --duet --check
+```
+
+两份文件的 SHA-256 与 audio-separator 0.48.0 的模型清单一致。模型作者为 aufr33，本仓库未核实到针对这份权重的独立商用或再分发许可；权重从上游下载，不随项目源码分发。[audio-separator 模型发布页](https://github.com/nomadkaraoke/python-audio-separator/releases/tag/model-configs) · [MVSep 男女人声分离评测](https://mvsep.com/en/algorithms)
+
 ## 权利分别确认
 
 - AIcoversong 的 MIT 许可适用于原创代码，不覆盖第三方权重、歌曲、原唱录音或个人声纹。

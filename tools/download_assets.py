@@ -89,6 +89,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=ROOT, help="Installation folder (also useful with --check)")
     parser.add_argument("--check", action="store_true", help="Read-only file and hash verification")
     parser.add_argument("--list", action="store_true", help="Print inventory without downloading")
+    parser.add_argument("--duet", action="store_true", help="Select only the optional male/female duet separator assets")
     parser.add_argument("--direct", action="store_true", help="Ignore system/environment proxies for this download")
     parser.add_argument("--hf-endpoint", help="Explicit HTTPS mirror for Hugging Face downloads")
     args = parser.parse_args()
@@ -96,7 +97,8 @@ def main() -> int:
         parsed = urlparse(args.hf_endpoint)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
             parser.error("--hf-endpoint must be an HTTPS origin without credentials, query or path")
-    items = json.loads(MANIFEST.read_text(encoding="utf-8"))["files"]
+    inventory = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    items = inventory["duet_files" if args.duet else "files"]
     for item in items:
         destination(args.root, item)
     print(f"{len(items)} assets, {sum(item['size'] for item in items) / 1e9:.2f} GB. Terms: docs/MODELS.md")

@@ -1,10 +1,8 @@
 """Safe local works-library helpers for AICover.
 
-The library is deliberately independent from Gradio.  It treats a finished
-``output/run_*`` directory as an immutable work, stores user-facing metadata
-in ``work.json``, and puts deleted works in ``output/.trash`` so they can be
-restored.  Re-mixes are new run directories; an earlier version is never
-overwritten.
+The library treats finished ``output/run_*`` folders as works, stores titles in
+``work.json``, and creates a separate folder for each new mix. Deleting a work
+removes its entire run folder.
 """
 
 from __future__ import annotations
@@ -14,14 +12,17 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 import uuid
+from zipfile import ZIP_STORED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = ROOT / "output"
 _RUN_NAME = re.compile(r"^run_[A-Za-z0-9][A-Za-z0-9_-]*$")
 _TITLE_LIMIT = 200
+_DELETE_LOCK = Lock()
 
 
 def _now() -> str:
@@ -30,9 +31,11 @@ def _now() -> str:
 
 def _root(output_root: str | Path | None) -> Path:
     root = Path(output_root) if output_root is not None else DEFAULT_OUTPUT_ROOT
-    root = root.expanduser().resolve(strict=False)
-    if root.name == ".trash":
-        raise ValueError("作品库根目录不能是回收站目录。")
+    root = root.expanduser()
+    _assert_root(root)
+    root = root.resolve(strict=False)
+    if root.name.casefold() == ".trash":
+        raise ValueError("只能操作当前作品库。")
     return root
 
 
@@ -45,30 +48,26 @@ def _inside(path: Path, parent: Path) -> bool:
 
 
 def _assert_root(root: Path) -> None:
-    if root.exists() and root.is_symlink():
-        raise ValueError("作品库根目录不能是符号链接。")
+    if root.is_symlink() or root.is_junction():
+        raise ValueError("作品库根目录不能是链接目录。")
     if root.exists() and not root.is_dir():
         raise ValueError(f"作品库根目录不是文件夹：{root}")
 
 
-def _run_from(value: Any, root: Path, *, allow_trash: bool = False) -> Path:
-    """Resolve a work argument and reject path traversal or symlink escape."""
+def _run_from(value: Any, root: Path) -> Path:
+    """Accept only an immediate child run directory, rejecting links before resolving."""
     _assert_root(root)
     if isinstance(value, dict):
         value = value.get("path") or value.get("run") or value.get("run_id")
     if value is None:
         raise ValueError("没有指定作品。")
     raw = Path(str(value))
-    if not raw.is_absolute():
-        raw = root / raw
-    candidate = raw.expanduser().resolve(strict=False)
-    trash = (root / ".trash").resolve(strict=False)
-    parent = trash if allow_trash and _inside(candidate, trash) else root
-    if not _inside(candidate, parent) or candidate.parent != parent:
+    candidate = raw if raw.is_absolute() else root / raw
+    if candidate.parent != root or not _RUN_NAME.fullmatch(candidate.name):
         raise ValueError("只能操作作品库中的 run_* 作品目录。")
-    if not _RUN_NAME.fullmatch(candidate.name):
-        raise ValueError("作品目录名称无效。")
-    if candidate.is_symlink() or not candidate.is_dir():
+    if candidate.is_symlink() or candidate.is_junction():
+        raise ValueError("不能操作链接目录。")
+    if not candidate.is_dir() or candidate.resolve().parent != root:
         raise ValueError("作品目录不存在或不是普通文件夹。")
     return candidate
 
@@ -147,27 +146,7 @@ def list_works(output_root: str | Path | None = None) -> list[dict[str, Any]]:
         return []
     works: list[dict[str, Any]] = []
     for run in sorted(root.iterdir(), key=lambda path: path.name, reverse=True):
-        if not run.is_dir() or run.is_symlink() or not _RUN_NAME.fullmatch(run.name):
-            continue
-        try:
-            _safe_file(run, "cover.wav", required=True)
-            works.append(_metadata(run))
-        except (OSError, ValueError):
-            continue
-    return works
-
-
-def list_trashed(output_root: str | Path | None = None) -> list[dict[str, Any]]:
-    """Return recoverable works in the private trash folder, newest first."""
-    root = _root(output_root)
-    trash = root / ".trash"
-    if not trash.exists():
-        return []
-    if trash.is_symlink() or not trash.is_dir():
-        raise ValueError("作品回收站不是安全的普通文件夹。")
-    works: list[dict[str, Any]] = []
-    for run in sorted(trash.iterdir(), key=lambda path: path.name, reverse=True):
-        if not run.is_dir() or run.is_symlink() or not _RUN_NAME.fullmatch(run.name):
+        if not run.is_dir() or run.is_symlink() or run.is_junction() or not _RUN_NAME.fullmatch(run.name):
             continue
         try:
             _safe_file(run, "cover.wav", required=True)
@@ -199,39 +178,74 @@ def rename_work(work: str | Path | dict[str, Any], title: str, output_root: str 
     return _metadata(run)
 
 
-def trash_work(work: str | Path | dict[str, Any], output_root: str | Path | None = None) -> dict[str, Any]:
-    root = _root(output_root)
-    run = _run_from(work, root)
-    trash = root / ".trash"
-    if trash.exists() and trash.is_symlink():
-        raise ValueError("作品回收站不能是符号链接。")
-    trash.mkdir(parents=True, exist_ok=True)
-    destination = trash / run.name
-    if destination.exists() or destination.is_symlink():
-        raise ValueError("回收站中已经有同名作品。")
-    shutil.move(str(run), str(destination))
-    return {"run_id": run.name, "path": str(destination), "trashed_at": _now()}
+def delete_work(work: str | Path | dict[str, Any], output_root: str | Path | None = None) -> None:
+    """Remove one finished run, leaving its catalog entries intact on a busy stem."""
+    with _DELETE_LOCK:
+        _delete_finished_run(_run_from(work, _root(output_root)))
 
 
-def restore_work(work: str | Path | dict[str, Any], output_root: str | Path | None = None) -> dict[str, Any]:
-    root = _root(output_root)
-    raw = work.get("path") if isinstance(work, dict) else work
-    if raw is None:
-        raise ValueError("没有指定要恢复的作品。")
-    trash = root / ".trash"
-    raw_path = Path(str(raw))
-    if not raw_path.is_absolute() and raw_path.parent == Path("."):
-        # A bare run id addresses the recoverable copy, never the live work.
-        candidate = _run_from(trash / raw_path.name, root, allow_trash=True)
-    else:
-        candidate = _run_from(raw, root, allow_trash=True)
-        if candidate.parent != trash.resolve(strict=False):
-            raise ValueError("只能从作品回收站恢复作品。")
-    destination = root / candidate.name
-    if destination.exists() or destination.is_symlink():
-        raise ValueError("作品库中已经有同名作品，无法恢复。")
-    shutil.move(str(candidate), str(destination))
-    return _metadata(destination)
+def _delete_finished_run(run: Path) -> None:
+    cover = _safe_file(run, "cover.wav", required=True)
+    job = _safe_file(run, "job.json", required=True)
+    custom = _safe_file(run, "work.json")
+    catalog = [job, custom] if custom else [job]
+    for child in run.iterdir():
+        if child == cover or child in catalog:
+            continue
+        if child.is_symlink():
+            child.unlink()
+        elif child.is_junction():
+            child.rmdir()
+        elif child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    # cover.wav and job.json are both needed for a failed deletion to stay
+    # selectable. In particular Windows media playback may hold cover.wav open.
+    removed_metadata = {}
+    try:
+        for path in catalog:
+            contents = path.read_bytes()
+            path.unlink()
+            removed_metadata[path] = contents
+        cover.unlink()
+    except OSError:
+        for path, contents in removed_metadata.items():
+            path.write_bytes(contents)
+        raise
+    run.rmdir()
+
+
+def _selected_ids(run_ids: list[str]) -> list[str]:
+    if not isinstance(run_ids, list) or not run_ids:
+        raise ValueError("请先勾选作品。")
+    if any(not isinstance(item, str) or not _RUN_NAME.fullmatch(item) for item in run_ids):
+        raise ValueError("选择中含有无效的作品编号，请刷新后重试。")
+    return list(dict.fromkeys(run_ids))
+
+
+def delete_selected(run_ids: list[str], *, output_root=None) -> tuple[list[str], dict[str, str]]:
+    """Report each work separately if a file is busy or another session deleted it."""
+    deleted = []
+    failed = {}
+    for run_id in _selected_ids(run_ids):
+        try:
+            delete_work(run_id, output_root)
+        except (OSError, ValueError) as exc:
+            failed[run_id] = str(exc)
+        else:
+            deleted.append(run_id)
+    return deleted, failed
+
+
+def export_selected(run_ids: list[str], destination: Path, *, output_root=None) -> None:
+    """Write only finished mixes, with portable, unique filenames inside the ZIP."""
+    works = [get_work(run_id, output_root) for run_id in _selected_ids(run_ids)]
+    with ZipFile(destination, "x", compression=ZIP_STORED, allowZip64=True) as archive:
+        for index, work in enumerate(works, 1):
+            title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(work["title"])).strip(" .")[:120] or "翻唱"
+            archive.write(work["cover"], f"{index:03d} - {title}.wav")
 
 
 def _new_run(root: Path) -> Path:
@@ -263,24 +277,10 @@ def remix_work(work: str | Path | dict[str, Any], *, output_root: str | Path | N
     parent = _run_from(work, root)
     parent_meta = _metadata(parent)
     job = parent_meta["job"]
-    instrumental = _safe_file(parent, "instrumental.wav", required=True)
-    converted = _safe_file(parent, "converted_vocals.wav") or _safe_file(parent, "my_vocals.wav", required=True)
-    reference_dry = _safe_file(parent, "lead_dry.wav") or _safe_file(parent, "vocals.wav", required=True)
-    reference_wet = _safe_file(parent, "lead_reverb.wav")
-    backing = _safe_file(parent, "backing_vocals.wav")
-    backing_converted = _safe_file(parent, "converted_backing.wav")
+    duet_mode = job.get("duet_mode", "off")
     mode = backing_mode or job.get("backing", "original")
     if mode not in {"original", "convert", "remove"}:
         raise ValueError("和声处理方式无效。")
-    if mode == "convert" and (backing is None or backing_converted is None):
-        raise ValueError("当前作品没有可用于转换的和声 stem，请保留原作品重新生成。")
-    if mode == "original" and backing is None:
-        backing = None
-    try:
-        from vocal_mix import mix_cover
-    except ImportError:  # package import when called outside the UI process
-        from .vocal_mix import mix_cover
-
     output = _new_run(root)
     try:
         params = {
@@ -291,16 +291,37 @@ def remix_work(work: str | Path | dict[str, Any], *, output_root: str | Path | N
             "dynamics": _numeric(dynamics, 0.6, 0, 1, "人声动态"),
             "reverb": _numeric(reverb, float(job.get("reverb", 1.0)), 0, 2, "混响量"),
         }
-        mix_args = {
-            "instrumental": instrumental, "converted": converted, "reference_dry": reference_dry,
-            "output_mix": output / "cover.wav", "output_vocal": output / "my_vocals.wav",
-            "reference_wet": reference_wet,
-            "backing": backing if mode != "remove" else None,
-            "backing_converted": backing_converted if mode == "convert" else None,
-            "backing_solo": backing_converted if mode == "original" else None,
-            **params,
-        }
-        report = mix_cover(**mix_args)
+        if duet_mode != "off":
+            if mode != "original":
+                raise ValueError("对唱作品重混会保留原声部，不能修改原曲和声模式。")
+            if __package__:
+                from . import duet_mix
+            else:
+                import duet_mix
+            sources = {key: _safe_file(parent, filename, required=True)
+                       for key, filename in duet_mix.remix_inputs(duet_mode).items()}
+            files = duet_mix.retain_stems(sources, output)
+            report = duet_mix.mix_duet(files, duet_mode, output,
+                                       **{key: value for key, value in params.items() if key != "backing_gain_db"})
+        else:
+            if __package__:
+                from .vocal_mix import mix_cover
+            else:
+                from vocal_mix import mix_cover
+            instrumental = _safe_file(parent, "instrumental.wav", required=True)
+            converted = _safe_file(parent, "converted_vocals.wav") or _safe_file(parent, "my_vocals.wav", required=True)
+            reference_dry = _safe_file(parent, "lead_dry.wav") or _safe_file(parent, "vocals.wav", required=True)
+            backing = _safe_file(parent, "backing_vocals.wav")
+            backing_converted = _safe_file(parent, "converted_backing.wav")
+            if mode == "convert" and (backing is None or backing_converted is None):
+                raise ValueError("当前作品没有可用于转换的和声 stem，请保留原作品重新生成。")
+            report = mix_cover(
+                instrumental=instrumental, converted=converted, reference_dry=reference_dry,
+                output_mix=output / "cover.wav", output_vocal=output / "my_vocals.wav",
+                reference_wet=_safe_file(parent, "lead_reverb.wav"),
+                backing=backing if mode != "remove" else None,
+                backing_converted=backing_converted if mode == "convert" else None,
+                backing_solo=backing_converted if mode == "original" else None, **params)
         new_job = dict(job)
         new_job.update({"run_dir": str(output), "parent_run": parent.name,
                         "vocal_gain": params["vocal_gain_db"], "instrumental_gain": params["music_gain_db"],
@@ -310,6 +331,8 @@ def remix_work(work: str | Path | dict[str, Any], *, output_root: str | Path | N
         _write_json(output / "mix_report.json", report if isinstance(report, dict) else {})
         result = {"status": "重混音完成", "run": str(output), "mix": str(output / "cover.wav"),
                   "converted": str(output / "my_vocals.wav"), "parent_run": parent.name}
+        if duet_mode != "off":
+            result.update(files, duet_mode=duet_mode)
         _write_json(output / "result.json", result)
         custom = dict(parent_meta.get("metadata") or {})
         custom.update({"title": parent_meta["title"], "parent_run": parent.name, "created_at": _now(),

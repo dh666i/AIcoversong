@@ -78,7 +78,8 @@ except Exception:   # a different Gradio: the page works as before, only without
 
 ROOT = pathlib.Path(now_dir).parent
 UI_ASSETS = pathlib.Path(now_dir) / "assets" / "ui"
-CSS = "\n".join((UI_ASSETS / name).read_text(encoding="utf-8") for name in ("cover.css", "cover-controls.css"))
+STYLESHEETS = ("cover.css", "cover-controls.css", "cover-media.css", "cover-library.css")
+CSS = "\n".join((UI_ASSETS / name).read_text(encoding="utf-8") for name in STYLESHEETS)
 THEME = gr.themes.Base(
     primary_hue="lime", secondary_hue="cyan", neutral_hue="zinc",
     font=["system-ui", "Microsoft YaHei", "sans-serif"], font_mono=["Consolas", "monospace"],
@@ -116,29 +117,17 @@ const watchAudioLoad = (audio) => {
   }, 6000);
 };
 const bindAudioStates = () => {
-  document.querySelectorAll('audio').forEach((audio) => {
+  document.querySelectorAll('.track audio:not([data-state-bound])').forEach((audio) => {
     if (audio.dataset.stateBound === 'true') return;
     audio.dataset.stateBound = 'true';
-    if (audio.dataset.lazy === 'true') {
-      setAudioStatus(audio, 'idle', '点击播放后加载音频');
-      audio.addEventListener('play', () => {
-        if (audio.dataset.loadingStarted === 'true') return;
-        audio.dataset.loadingStarted = 'true';
-        setAudioStatus(audio, 'loading', '正在读取音频信息…');
-        audio.load();
-        audio.play().catch(() => {});
-      }, {once: true});
-    } else {
-      setAudioStatus(audio, 'loading', '正在读取音频信息…');
-    }
-    if (audio.dataset.lazy !== 'true') watchAudioLoad(audio);
+    if (audio.readyState >= 1) setAudioStatus(audio, 'ready', '');
+    else watchAudioLoad(audio);
     audio.addEventListener('loadstart', () => {
       setAudioStatus(audio, 'loading', '正在读取音频信息…');
       watchAudioLoad(audio);
     });
     audio.addEventListener('loadedmetadata', () => {
       clearAudioTimer(audio);
-      audio.dataset.lazy = 'false';
       setAudioStatus(audio, 'ready', '');
     });
     audio.addEventListener('canplay', () => {
@@ -159,8 +148,6 @@ const bindAudioStates = () => {
       const audio = button.closest('.track')?.querySelector('audio');
       if (!audio) return;
       button.hidden = true;
-      audio.dataset.loadingStarted = 'false';
-      audio.dataset.lazy = 'false';
       audio.preload = 'metadata';
       setAudioStatus(audio, 'loading', '正在重新读取音频信息…');
       watchAudioLoad(audio);
@@ -179,6 +166,26 @@ if (document.readyState === 'loading') {
   observeAudio();
 }
 const controlButtons = '.gr-accordion > button.label-wrap, .tab-like-container > .reset-button, #song-drop button.center';
+const titleFields = '#page input[role="combobox"], #history-search textarea, #history-title textarea';
+function disableTitleCorrections(field) {
+  field.spellcheck = false;
+  field.setAttribute('autocorrect', 'off');
+  field.setAttribute('autocapitalize', 'off');
+}
+// Gradio opens a readonly choice on focus. Escape can leave it focused and closed.
+document.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  const trigger = event.target.closest?.('#page .wrap-inner');
+  const field = trigger?.querySelector('input[role="combobox"][readonly]:enabled');
+  if (!field) return;
+  event.preventDefault();
+  if (field.getAttribute('aria-expanded') === 'true') {
+    field.blur();
+  } else {
+    if (field === document.activeElement) field.blur();
+    field.focus({preventScroll: true});
+  }
+});
 function labelControl(button) {
   if (button.classList.contains('label-wrap')) {
     button.setAttribute('aria-expanded', String(button.classList.contains('open')));
@@ -203,7 +210,9 @@ function labelControl(button) {
 function labelNewControls(element) {
   if (!(element instanceof Element)) return;
   if (element.matches(controlButtons)) labelControl(element);
+  if (element.matches(titleFields)) disableTitleCorrections(element);
   element.querySelectorAll(controlButtons).forEach(labelControl);
+  element.querySelectorAll(titleFields).forEach(disableTitleCorrections);
 }
 const observeControlLabels = () => {
   labelNewControls(document.body);
@@ -219,7 +228,7 @@ if (document.readyState === 'loading') {
 } else {
   observeControlLabels();
 }
-</script>"""
+</script>""" + "<script>" + (UI_ASSETS / "cover-motion.js").read_text(encoding="utf-8") + "</script>"
 
 _WAVE_MARK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 10v4m4-8v12m5-15v18m5-15v12m4-8v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
 MASTHEAD = f'''<header class="studio-bar">

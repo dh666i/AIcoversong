@@ -1,0 +1,148 @@
+/* The file component places its clear button flush against the top corner. */
+#page #song-drop:has(.file-preview-holder) {
+  border-style: solid !important;
+  background: var(--control-surface) !important;
+}
+#song-drop .file-preview-holder {
+  display: flex;
+  align-items: center;
+  min-height: 78px;
+  padding: 12px 66px 12px 18px;
+}
+#song-drop .file-preview .filename {
+  align-items: baseline;
+  padding: 0;
+  color: var(--text);
+}
+#song-drop .file-preview { margin: 0; }
+#page :is(#song-drop, #cover-mic-recorder) .icon-button-wrapper.top-panel {
+  right: 14px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  z-index: 2;
+}
+#page #song-drop .icon-button-wrapper.top-panel { top: 50%; transform: translateY(-50%); }
+#page :is(#song-drop, #cover-mic-recorder) .top-panel .icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--glass);
+  color: var(--muted);
+  box-shadow: none;
+  transition: color .16s, background-color .16s, border-color .16s, scale .12s;
+}
+#page :is(#song-drop, #cover-mic-recorder) .top-panel .icon-button:hover {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 65%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, var(--input-bg));
+}
+#page :is(#song-drop, #cover-mic-recorder) .top-panel .icon-button:active { scale: .94; }
+#page :is(#song-drop, #cover-mic-recorder) .top-panel .icon-button > div {
+  width: 15px;
+  height: 15px;
+}
+
+/* Keep the Gradio recorder, waveform and transport in their native states. */
+#page #cover-mic-recorder {
+  position: relative;
+  min-width: 0;
+  padding: 15px 16px !important;
+}
+#page #cover-mic-recorder > [data-testid="block-label"] {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  height: auto;
+  margin: 0 38px 12px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: 650 14px/1.5 var(--sans);
+  box-shadow: none;
+}
+#cover-mic-recorder > [data-testid="block-label"] svg { color: var(--cyan); }
+#page #cover-mic-recorder .audio-container { height: auto; }
+#page #cover-mic-recorder .component-wrapper { min-width: 0; padding: 0; }
+#page #cover-mic-recorder .icon-button-wrapper.top-panel { top: 10px; }
+#page #cover-mic-recorder .audio-container:has(.mic-select) .icon-button-wrapper.top-panel {
+  display: none;
+}
+#cover-mic-recorder .controls:has(.mic-select) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px 12px;
+}
+#cover-mic-recorder .controls:has(.mic-select) .wrapper { gap: 6px; }
+#cover-mic-recorder .mic-select {
+  flex: 1 1 140px;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  height: 40px;
+  padding: 0 30px 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  appearance: none;
+  background-color: var(--input-bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23ceccd4' stroke-width='1.5'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-size: 14px;
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  color: var(--text);
+  font: 550 13px/1.45 var(--sans);
+  cursor: pointer;
+}
+#cover-mic-recorder .mic-select option { background: var(--surface); color: var(--text); }
+#cover-mic-recorder .mic-select:enabled:hover { border-color: var(--control-hover-border); }
+#cover-mic-recorder .mic-select:disabled { color: var(--dim); cursor: default; }
+#cover-mic-recorder .wrapper :is(.record-button, .stop-button, .stop-button-paused, .pause-button, .resume-button) {
+  gap: 7px;
+  min-height: 40px;
+  height: 40px;
+  width: auto;
+  margin: 0;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--glass);
+  color: var(--text);
+  font: 650 14px/1.4 var(--sans);
+  white-space: nowrap;
+  transition: background-color .18s, border-color .18s, scale .12s;
+}
+#cover-mic-recorder .wrapper .record-button {
+  background: color-mix(in srgb, var(--primary) 10%, var(--input-bg));
+  border-color: color-mix(in srgb, var(--primary) 46%, var(--line));
+}
+#cover-mic-recorder .wrapper .record-button::before {
+  width: 10px; height: 10px; margin: 0; background: var(--primary);
+}
+#cover-mic-recorder .wrapper :is(.stop-button,.stop-button-paused)::before {
+  width: 10px; height: 10px; margin: 0; border-radius: 2px;
+  background: var(--danger); animation: none;
+}
+#cover-mic-recorder .wrapper button:enabled:hover { background: var(--glass2); border-color: var(--primary); }
+#cover-mic-recorder .wrapper button:enabled:active { scale: .97; }
+#cover-mic-recorder .timestamps { color: var(--muted); font: 12px/1.5 var(--mono); }
+#cover-mic-recorder .control-wrapper, #cover-mic-recorder .play-pause-wrapper { color: var(--text); }
+#cover-mic-recorder .play-pause-wrapper > button { min-width: 30px; min-height: 30px; color: var(--text); }
+#cover-mic-recorder .play-pause-wrapper > button:hover { color: var(--primary); }
+@media (prefers-reduced-motion: reduce) {
+  #cover-mic-recorder .wrapper button, #page :is(#song-drop, #cover-mic-recorder) .top-panel .icon-button {
+    transition: none;
+  }
+}

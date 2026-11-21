@@ -145,5 +145,23 @@
       "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
       "license_note": "Model-specific terms; see docs/MODELS.md. Weights are downloaded from upstream and are not included in this repository."
     }
+  ],
+  "duet_files": [
+    {
+      "dest": "Applio/rvc/models/uvr/bs_roformer_male_female_by_aufr33_sdr_7.2889.ckpt",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/bs_roformer_male_female_by_aufr33_sdr_7.2889.ckpt",
+      "size": 527119779,
+      "sha256": "3cf11736d1b42a11ae55d8299316585921477dd2a671b24b663660846ca9861b",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Optional aufr33 model. No separate weight license verified. See docs/MODELS.md."
+    },
+    {
+      "dest": "Applio/rvc/models/uvr/config_chorus_male_female_bs_roformer.yaml",
+      "url": "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/config_chorus_male_female_bs_roformer.yaml",
+      "size": 1847,
+      "sha256": "363ef6bef5f0fd89b69e6e0f90dcc102dec6aaeb6e55790cae1796bebdf5097e",
+      "origin": "https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0",
+      "license_note": "Config pinned to the version catalogued for the aufr33 male/female model."
+    }
   ]
 }

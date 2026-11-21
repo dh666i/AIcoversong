@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
+from zipfile import ZipFile
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
@@ -59,7 +62,7 @@ class CoverLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             library.get_work(outside / "run_bad", self.root)
         with self.assertRaises(ValueError):
-            library.trash_work(Path(self.temp.name) / "../run_bad", self.root)
+            library.delete_work(Path(self.temp.name) / "../run_bad", self.root)
 
     def test_rename_only_updates_work_metadata(self):
         renamed = library.rename_work(self.run.name, "我的成品", self.root)
@@ -68,18 +71,82 @@ class CoverLibraryTests(unittest.TestCase):
         data = json.loads((self.run / "work.json").read_text(encoding="utf-8"))
         self.assertEqual(data["title"], "我的成品")
 
-    def test_trash_and_restore_are_reversible(self):
-        removed = library.trash_work(self.run.name, self.root)
+    def test_delete_only_removes_the_selected_directory(self):
+        sibling = self._make_run("run_sibling")
+        legacy = self.root / ".trash" / self.run.name
+        legacy.mkdir(parents=True)
+        (legacy / "cover.wav").write_bytes(b"legacy")
+        library.delete_work(self.run.name, self.root)
         self.assertFalse(self.run.exists())
-        self.assertTrue(Path(removed["path"]).is_dir())
-        restored = library.restore_work(removed["path"], self.root)
-        self.assertEqual(restored["run_id"], self.run.name)
-        self.assertTrue(self.run.is_dir())
+        self.assertTrue((sibling / "cover.wav").is_file())
+        self.assertEqual((legacy / "cover.wav").read_bytes(), b"legacy")
 
-    def test_restore_by_run_id_from_trash(self):
-        library.trash_work(self.run.name, self.root)
-        restored = library.restore_work(self.run.name, self.root)
-        self.assertEqual(restored["run_id"], self.run.name)
+    def test_incomplete_run_is_not_deletable(self):
+        (self.run / "cover.wav").unlink()
+        with self.assertRaises(ValueError):
+            library.delete_work(self.run.name, self.root)
+        self.assertTrue((self.run / "job.json").is_file())
+
+    def test_bulk_delete_validates_all_ids_then_reports_each_work(self):
+        with self.assertRaises(ValueError):
+            library.delete_selected([self.run.name, "../run_other"], output_root=self.root)
+        self.assertTrue(self.run.is_dir())
+        deleted, failed = library.delete_selected([self.run.name, self.run.name, "run_missing"], output_root=self.root)
+        self.assertEqual(deleted, [self.run.name])
+        self.assertEqual(list(failed), ["run_missing"])
+        self.assertFalse(self.run.exists())
+
+    def test_busy_audio_stays_in_the_library_until_retry(self):
+        library.rename_work(self.run.name, "Take 2", self.root)
+        cover = (self.run / "cover.wav").resolve()
+        real_unlink = Path.unlink
+
+        def busy(path):
+            if path == cover:
+                raise PermissionError("in use")
+            real_unlink(path)
+        with patch.object(Path, "unlink", busy):
+            deleted, failed = library.delete_selected([self.run.name], output_root=self.root)
+        self.assertEqual(deleted, [])
+        self.assertIn(self.run.name, failed)
+        rows = library.list_works(self.root)
+        self.assertEqual([(work["run_id"], work["title"]) for work in rows], [(self.run.name, "Take 2")])
+        self.assertEqual(library.delete_selected([self.run.name], output_root=self.root), ([self.run.name], {}))
+
+    def test_delete_rejects_linked_run_and_leaves_nested_link_target_intact(self):
+        outside = Path(self.temp.name) / "other_files"
+        outside.mkdir()
+        marker = outside / "keep.wav"
+        marker.write_bytes(b"keep")
+        alias = self.root / "run_alias"
+        def link_directory(link, target):
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(target), str(link))
+            else:
+                link.symlink_to(target, target_is_directory=True)
+
+        link_directory(alias, outside)
+        with self.assertRaises(ValueError):
+            library.delete_work(alias, self.root)
+        link_directory(self.run / "external_dir", outside)
+        library.delete_work(self.run.name, self.root)
+        self.assertEqual(marker.read_bytes(), b"keep")
+
+    def test_export_contains_only_selected_finished_mixes_with_unique_safe_names(self):
+        second = self._make_run("run_other")
+        for run in (self.run, second):
+            library.rename_work(run.name, "../同名:作品", self.root)
+        target = Path(self.temp.name) / "selected.zip"
+        library.export_selected([self.run.name, second.name, second.name], target, output_root=self.root)
+        with ZipFile(target) as archive:
+            names = archive.namelist()
+            self.assertEqual(len(names), 2)
+            self.assertEqual(len(set(names)), 2)
+            for name in names:
+                self.assertTrue(name.endswith(".wav"))
+                self.assertNotRegex(name, r'[/\\:]')
+                self.assertEqual(archive.read(name), b"cover")
 
     def test_remix_creates_new_version_and_keeps_parent(self):
         calls = []

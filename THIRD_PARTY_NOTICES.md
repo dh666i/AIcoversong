@@ -8,6 +8,7 @@ AIcoversong is an independent application built using the following projects. It
 | RVC ecosystem | Voice conversion architecture and underlying methods through Applio | Retain embedded source notices; [RVC project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) |
 | audio-separator 0.48.0 | Model execution for vocal, lead/backing and reverb separation | MIT package metadata; [source](https://github.com/nomadkaraoke/python-audio-separator/tree/v0.48.0). Its dependencies and model weights have separate licenses |
 | Gradio 6.20.0 | Local web interface | Apache-2.0; [source](https://github.com/gradio-app/gradio) |
+| Lucide static 0.468.0 | Inline play, pause and download icons in the works library | [ISC notice](licenses/Lucide-ISC.txt); [source](https://github.com/lucide-icons/lucide) |
 | PyTorch / torchaudio / torchvision | Neural inference and training | BSD-style notices and bundled dependency terms; [PyTorch](https://github.com/pytorch/pytorch) |
 | ContentVec / HuBERT, RMVPE, FCPE, SwiftF0 | Speech features and pitch extraction | Model-specific terms; [model inventory](docs/MODELS.md) |
 | NumPy, SciPy, SoundFile, librosa, soxr, FAISS | Signal processing and feature retrieval | Their distributed licenses (including BSD, ISC, LGPL-related native components, Apache/MIT as applicable); installed package metadata is authoritative |

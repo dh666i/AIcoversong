@@ -25,8 +25,7 @@
 #page .gr-accordion .block:not(.gr-accordion),
 #page #train-form .block,
 #page #voice-picker-row .block,
-#page #history-toolbar .block,
-#page #history-recovery-actions .block {
+#page #history-toolbar .block {
   padding: 0;
   border: 0;
   background: transparent;
@@ -95,6 +94,14 @@
 #page #reset-cover { justify-self: start; align-self: start; }
 
 /* Radiogroup fields stay native and wrap without shrinking the labels. */
+#page #duet-routing {
+  padding: 15px 16px; border: 1px solid var(--line);
+  border-radius: var(--radius-control); background: var(--panel-soft);
+}
+#page #duet-routing .form, #page #duet-uploads .form { border: 0; background: transparent; }
+#page :is(#duet-routing, #duet-mode, #duet-second-voice) .block,
+#page :is(#duet-mode, #duet-second-voice) { border: 0; padding: 0; background: transparent; }
+#page #duet-uploads .field-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 #page fieldset:has(input[type="radio"]) { margin: 0; padding: 0; border: 0; }
 #page fieldset:has(input[type="radio"]) .wrap:has(> label) { gap: 8px; }
 #page label:has(> input[type="radio"]) {
@@ -247,6 +254,7 @@
   border-radius: 16px;
   background: var(--control-surface);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 #page .wrap:has(input[role="combobox"]) > .wrap-inner {
   height: auto;
@@ -273,21 +281,36 @@
 }
 #page .container > .wrap:has(input[role="combobox"]):is(:focus-within,:hover) { border-color: var(--control-hover-border); }
 #page .container > .wrap:has(input[role="combobox"]):focus-within { outline: none; box-shadow: var(--control-ring); }
+#page .wrap:has(input[role="combobox"]) .dropdown-arrow { transition: transform 160ms ease-out, color 160ms ease; }
 #page .wrap:has(input[aria-expanded="true"]) .dropdown-arrow { color: var(--primary); transform: rotate(180deg); }
+/* Field labels and neighbouring Gradio blocks can paint above the list's
+   wrapper. Raise the open field through its layout ancestors in both directions. */
+#page :is(.block,.form,.row,.column):has(input[role="combobox"][aria-expanded="true"]) {
+  position: relative;
+  z-index: 50;
+  overflow: visible !important;
+}
+#page .wrap:has(> .options[role="listbox"]) { z-index: 50; }
 #page .options[role="listbox"] {
   z-index: 90;
   box-sizing: border-box;
   min-width: 0;
-  margin: 0;
+  margin: 4px 0;
   padding: 5px;
   list-style: none;
   border: 1px solid var(--control-hover-border);
   border-radius: 16px;
-  background: linear-gradient(170deg, color-mix(in srgb, var(--primary) 6%, var(--surface)), var(--surface));
+  background-color: var(--surface);
+  background-image: linear-gradient(155deg, color-mix(in srgb, var(--primary) 6%, var(--surface)), var(--surface) 70%);
   box-shadow: 0 16px 36px #0005;
   scrollbar-width: thin;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 #page .options [role="option"] {
+  display: flex;
+  gap: 8px;
+  box-sizing: border-box;
   width: 100% !important;
   min-height: 38px;
   padding: 7px 10px;
@@ -296,15 +319,32 @@
   color: var(--text);
   font: 550 14px/1.45 var(--sans);
   overflow-wrap: anywhere;
+  transition: background-color 110ms ease, color 110ms ease;
 }
-#page .options [role="option"]:is(:hover,.active) { background: var(--surface-soft); }
-#page .options [role="option"][aria-selected="true"] {
-  color: var(--bg);
-  background: linear-gradient(108deg, var(--primary), var(--cyan));
+#page .options [role="option"] > .inner-item {
+  flex: 0 0 16px;
+  padding: 0;
+  color: inherit;
+  text-align: center;
+  pointer-events: none;
+}
+#page .options [role="option"]:is(:hover,.active) { background-color: var(--surface-soft); }
+#page .options [role="option"][aria-selected="true"],
+#page .options [role="option"][aria-selected="true"]:is(:hover,.active) {
+  color: var(--on-primary);
+  background-color: var(--primary);
+  background-image: linear-gradient(108deg, var(--primary), var(--cyan));
+}
+#page label:has(> input[type="radio"]) {
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
 }
 #page .parts > summary { gap: 12px; min-height: 38px; font: 650 14px/1.45 var(--sans); color: var(--text); }
 #page .parts[open] > summary::after { transform: rotate(225deg); }
 #page .parts > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-  #page .gr-accordion > .label-wrap .icon { transition: none; }
+  #page .gr-accordion > .label-wrap .icon,
+  #page .container > .wrap:has(input[role="combobox"]),
+  #page .wrap .dropdown-arrow,
+  #page .options [role="option"],
+  #page label:has(> input[type="radio"]) { transition: none; }
 }

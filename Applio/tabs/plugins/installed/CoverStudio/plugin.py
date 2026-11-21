@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -36,6 +37,9 @@ import voice_training as trainer
 
 BACKING_CHOICES = [("保留原唱的和声（推荐）", "original"), ("和声也换成我的声音", "convert"), ("不要和声", "remove")]
 RANGE_CHOICES = [("自动（推荐）", "auto"), ("保持原来的音高", "keep"), ("降一个八度", "down")]
+DUET_MODES = [("常规翻唱", "off"), ("只换男声，保留原女声", "male"),
+              ("只换女声，保留原男声", "female"), ("男女声都换", "both")]
+SAME_VOICE = "__same_as_primary__"
 IDLE = {"state": "idle"}
 
 
@@ -70,9 +74,9 @@ def _index_for(model: str | None) -> str:
     return choices[1] if len(choices) > 1 else pipeline.NO_INDEX
 
 
-def _refresh_voices():
+def _refresh_voices(current=None):
     voices = _voices()
-    selected = _default_voice(voices)
+    selected = current if any(path == current for _, path in voices) else _default_voice(voices)
     return gr.update(choices=voices, value=selected)
 
 
@@ -130,20 +134,46 @@ def _cover_start_button(blocked_reason, snapshot):
     return gr.update(interactive=not blocked_reason, value=blocked_reason or "开始翻唱")
 
 
-def _cover_input_change(song, model, current_task):
-    message, reason = _cover_requirements(song, model)
+def _duet_requirements(mode, source, second, male, female, voices):
+    if mode == "off":
+        return "", ""
+    if mode not in {"male", "female", "both"} or source not in {"auto", "stems"}:
+        return "请选择有效的对唱模式和人声来源。", "请选择对唱模式"
+    if mode == "both" and second and second != SAME_VOICE:
+        if not any(value == second for _, value in voices) or _is_demo_voice(second, voices):
+            return "女声的目标音色不可用，可选择与男声使用同一音色。", "请选择女声音色"
+    if source == "stems":
+        if not male or not female:
+            return "请分别上传男声和女声的完整人声分轨。", "请补齐两条分轨"
+        if Path(male).resolve() == Path(female).resolve():
+            return "两个声部选中了同一个文件，请重新选择。", "请检查分轨"
+    else:
+        from duet_separator import duet_available
+        if not duet_available():
+            return ("自动分离需要额外模型。在项目根目录运行 .\\env\\Scripts\\python.exe "
+                    "tools/download_assets.py --duet，安装后点「刷新音色」。也可选择已有分轨。", "缺少对唱分离模型")
+    return "", ""
+
+
+def _cover_input_change(song, model, current_task, mode="off", source="auto", second=None, male=None, female=None):
+    voices = _voices()
+    message, reason = _cover_requirements(song, model, voices)
+    if not message:
+        extra_message, extra_reason = _duet_requirements(mode, source, second, male, female, voices)
+        message, reason = extra_message, extra_reason or reason
     return _voice_alert_update(message), reason, _cover_start_button(reason, _task_snapshot(current_task))
 
 
-def _settings_summary(pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate):
+def _settings_summary(pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate, mode="off"):
     pitch = next((label for label, value in RANGE_CHOICES if value == pitch_mode), "自动")
     harmonies = next((label for label, value in BACKING_CHOICES if value == backing), "保留原唱和声")
     pitch = pitch.removesuffix("（推荐）")
     harmonies = harmonies.removesuffix("（推荐）")
-    parts = [pitch, harmonies, f"清晰度 {float(clarity):.0%}", f"混响 {float(reverb):.1f}"]
+    scope = harmonies if mode == "off" else next(label for label, value in DUET_MODES if value == mode)
+    parts = [pitch, scope, f"清晰度 {float(clarity):.0%}", f"混响 {float(reverb):.1f}"]
     if float(vocal_gain) or float(music_gain):
         parts.append(f"人声 {float(vocal_gain):+.1f} dB · 伴奏 {float(music_gain):+.1f} dB")
-    if not refine:
+    if mode == "off" and not refine:
         parts.append("未精细处理")
     if float(index_rate) != 0.25:
         parts.append(f"检索 {float(index_rate):.2f}")
@@ -178,8 +208,6 @@ const rough = (seconds) => {
 };
 let shown = null;          // last snapshot from the server
 let received = 0;          // performance.now() when it arrived
-let display = 0;           // last server-reported fraction; CSS transitions the visual bar
-let rail = 0;              // how much of the line between the dots is filled
 let clockTimer = 0;
 let lifecycleObserver = null;
 let disposed = false;
@@ -194,9 +222,9 @@ function updateClock() {
   if (!shown || shown.state !== 'running' || !root.isConnected) return;
   const elapsed = (shown.elapsed || 0) + (performance.now() - received) / 1000;
   const reached = Math.min(0.99, Math.max(0, Number(shown.overall) || 0));
-  const left = reached > 0.03 && elapsed > 8 ? elapsed * (1 - reached) / reached : null;
+  const left = !shown.stopping && reached > 0.03 && elapsed > 8 ? elapsed * (1 - reached) / reached : null;
   const time = root.querySelector('.time');
-  time.textContent = '已用 ' + clock(elapsed) + (left === null ? '' : ' · ' + rough(left) + '（按已报告进度估算，可能变化）');
+  time.textContent = '已用 ' + clock(elapsed) + (left === null ? '' : ' · ' + rough(left));
 }
 
 function scheduleClock() {
@@ -229,15 +257,16 @@ if (document.body) lifecycleObserver.observe(document.body, {childList: true, su
 
 function structure(data) {
   const steps = (data.steps || []).map((label, i) =>
-    `<li data-i="${i}"><span class="dot"></span><span class="name">${esc(label)}</span></li>`).join('');
+    `<li data-i="${i}"><span class="dot" aria-hidden="true"></span><span class="name">${esc(label)}</span><span class="step-status"></span></li>`).join('');
   root.innerHTML = `
-    <div class="stage-head" aria-hidden="true"><span class="stage-code">任务进度</span><span class="stage-badge"></span></div>
-    ${data.title ? `<h2 class="what">${esc(data.title)}</h2>` : ''}
-    <ol class="steps" style="--n:${(data.steps || []).length}">${steps}<span class="rail"><i></i></span></ol>
+    <div class="stage-head"><div class="stage-caption"><span class="stage-badge"></span><span class="step-count"></span></div>
+      <h3 class="what">${esc(data.title || '音色训练')}</h3>
+      <span class="pct" aria-hidden="true"></span></div>
     <div class="stage-meter" data-mode="indeterminate" role="progressbar" aria-label="任务整体进度" aria-valuemin="0" aria-valuemax="100" aria-valuetext="正在准备任务进度"><i aria-hidden="true"></i></div>
-    <p class="now"><b></b><span class="pct"></span></p>
-    <p class="stage-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
     <p class="time"></p>
+    <ol class="steps" aria-label="处理步骤">${steps}</ol>
+    <p class="now"></p>
+    <p class="stage-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
     <p class="hint"></p>
     <div class="notes"></div>`;
 }
@@ -250,17 +279,13 @@ function paint() {
   // Once the server reports a fraction, interpolate only up to that value.
   const reported = Number(data.overall);
   const measured = Number.isFinite(reported) && reported > 0;
-  const target = data.state === 'done' ? 1 : Math.min(0.99, measured ? reported : 0);
-  display = target;
-  // the line follows the steps: dot i is where step i starts, the stretch after it is that step
+  const display = data.state === 'done' ? 1 : Math.min(0.99, measured ? reported : 0);
   const count = (data.steps || []).length;
-  const along = count > 1 ? Math.min(1, ((data.step || 0) + (data.step_fraction || 0)) / (count - 1)) : (data.step_fraction || 0);
-  const railTarget = data.state === 'done' ? 1 : running ? along : rail;
-  rail = railTarget;
-  root.querySelector('.rail i').style.transform = `scaleX(${rail})`;
+  const step = Math.min(count - 1, Math.max(0, Number(data.step) || 0));
+  root.querySelector('.step-count').textContent = running && count > 1 ? `第 ${step + 1} / ${count} 步` : '';
   const badge = root.querySelector('.stage-badge');
-  badge.dataset.state = data.state;
-  badge.textContent = data.state === 'running' ? '处理中' : data.state === 'done' ? '已完成' : data.state === 'stopped' ? '已停止' : '未完成';
+  badge.textContent = data.stopping ? '正在停止' : ({running:'制作中', done:'已完成', stopped:'已停止', failed:'未完成'})[data.state];
+  if (running && !data.title && !data.stopping) badge.textContent = '训练中';
   const meter = root.querySelector('.stage-meter');
   const meterBar = meter.querySelector('i');
   const meterMode = data.state === 'done' || measured ? 'determinate' : running ? 'indeterminate' : 'unknown';
@@ -277,20 +302,23 @@ function paint() {
   }
   root.querySelectorAll('.steps li').forEach((li) => {
     const i = Number(li.dataset.i);
-    li.dataset.s = data.state === 'done' || i < data.step ? 'done' : i === data.step ? (data.state === 'failed' ? 'failed' : data.state === 'stopped' ? 'stopped' : 'now') : 'todo';
-    if (running && i === data.step) li.setAttribute('aria-current', 'step');
+    const state = data.state === 'done' || i < step ? 'done' : i === step ? (running ? 'now' : data.state) : 'todo';
+    li.dataset.s = state;
+    li.querySelector('.step-status').textContent = ({done:'完成', now:data.stopping ? '停止中' : '处理中', failed:'失败', stopped:'已停止', todo:'待处理'})[state];
+    if (running && i === step) li.setAttribute('aria-current', 'step');
     else li.removeAttribute('aria-current');
   });
-  const now = root.querySelector('.now b'), pct = root.querySelector('.pct'), time = root.querySelector('.time');
+  const now = root.querySelector('.now'), pct = root.querySelector('.pct'), time = root.querySelector('.time');
   const announcement = root.querySelector('.stage-announcement');
-  root.querySelector('.hint').textContent = running ? (data.hint || '') : '';
+  root.querySelector('.hint').textContent = running ? (data.hint || '') :
+    data.state !== 'done' ? (data.detail || '') : '';
   if (running) {
-    const label = (data.steps || [])[data.step] || data.message || '';
+    const label = data.stopping ? '停止任务' : (data.steps || [])[step] || data.message || '准备任务';
     if (announcement.dataset.message !== label) {
       announcement.textContent = '正在' + label;
       announcement.dataset.message = label;
     }
-    now.textContent = '正在' + label + (data.detail ? `（${data.detail}）` : '');
+    now.textContent = data.stopping ? '' : data.detail || (count ? '' : data.message || '');
     pct.textContent = measured ? (display > 0 && display < 0.005 ? '<1%' : Math.round(display * 100) + '%') : '';
     updateClock();
     scheduleClock();
@@ -301,8 +329,9 @@ function paint() {
       announcement.textContent = now.textContent;
       announcement.dataset.message = now.textContent;
     }
-    pct.textContent = '';
-    time.textContent = `共用 ${clock(data.elapsed || 0)}` + (data.detail ? `。${data.detail}` : '');
+    pct.textContent = '100%';
+    time.textContent = Number.isFinite(data.elapsed) ? `共用 ${clock(data.elapsed)}` : '';
+    if (data.detail) now.textContent = data.detail;
   } else {
     stopClock();
     now.textContent = data.message || data.error || (data.state === 'stopped' ? '已停止' : '没有完成');
@@ -310,8 +339,8 @@ function paint() {
       announcement.textContent = now.textContent;
       announcement.dataset.message = now.textContent;
     }
-    pct.textContent = '';
-    time.textContent = data.detail || '';
+    pct.textContent = measured ? Math.round(display * 100) + '%' : '';
+    time.textContent = Number.isFinite(data.elapsed) ? '已用 ' + clock(data.elapsed) : '';
   }
   const notes = (data.notes || []).map((text) => `<p>${esc(text)}</p>`).join('');
   const box = root.querySelector('.notes');
@@ -327,14 +356,14 @@ function update() {
   lastSnapshot = signature;
   if (!data || !data.state || data.state === 'idle') {
     shown = null; stopClock();
-    root.dataset.state = 'idle'; root.innerHTML = ''; display = 0; rail = 0;
+    root.dataset.state = 'idle'; root.innerHTML = '';
     return;
   }
   const newRun = shown && (shown.run !== data.run || (shown.state !== 'running' && data.state === 'running'));
   const fresh = !shown || newRun || (shown.steps || []).join('|') !== (data.steps || []).join('|') || shown.title !== data.title || !root.firstChild;
-  if (fresh) { structure(data); if (!shown || newRun || data.overall < display) { display = 0; rail = 0; } }
+  if (fresh) structure(data);
   shown = data; received = performance.now();
-  root.dataset.state = data.state;
+  root.dataset.state = data.stopping ? 'stopping' : data.state;
   paint();
   if (data.state === 'running') scheduleClock();
   else stopClock();
@@ -345,56 +374,64 @@ update();
 
 PROGRESS_CSS = """
 .stage {
-  --stage-cyan: var(--primary, var(--color-accent));
-  --stage-violet: var(--cyan, var(--color-accent));
-  --stage-surface: var(--input-bg, var(--block-background-fill));
-  --stage-line: var(--line-strong, var(--border-color-primary));
-  --stage-text: var(--text, var(--body-text-color));
-  --stage-muted: var(--muted, var(--body-text-color-subdued));
+  --stage-cyan: var(--primary, #d8ff44);
+  --stage-violet: var(--cyan, #55f1ff);
   --stage-accent: var(--stage-cyan);
-  display: block; margin: 0; padding: 20px; border: 1px solid var(--stage-line);
-  border-radius: 22px; background: var(--stage-surface); color: var(--stage-text);
+  --stage-line: var(--line, #464550);
+  --stage-text: var(--text, #f8f5ea);
+  --stage-muted: var(--muted, #b7b5c3);
+  display: grid; gap: 12px; min-width: 0; width: 100%; box-sizing: border-box;
+  color: var(--stage-text); font-family: var(--sans, sans-serif);
 }
-.stage[data-state="idle"] { display: none; }
-.stage[data-state="done"] { --stage-accent: var(--success, var(--stage-cyan)); }
-.stage[data-state="failed"] { --stage-accent: var(--danger, var(--error-text-color)); }
-.stage[data-state="stopped"] { --stage-accent: var(--stage-muted); }
-.stage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
-.stage-code { color: var(--stage-muted); font-size: 13px; font-weight: 650; }
-.stage-badge {
-  display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px;
-  border: 1px solid color-mix(in srgb, var(--stage-accent) 40%, var(--stage-line)); border-radius: 999px;
-  color: var(--stage-text); background: color-mix(in srgb, var(--stage-accent) 10%, transparent);
-  font-size: 12px; line-height: 1.4; font-weight: 650;
+.stage[data-state="idle"], .stage :is(.now,.time,.hint,.notes,.steps):empty { display: none; }
+.stage[data-state="done"] { --stage-accent: var(--success, #64e8b6); }
+.stage:is([data-state="stopped"],[data-state="stopping"]) { --stage-accent: var(--orange, #ffac64); }
+.stage[data-state="failed"] { --stage-accent: var(--danger, #ff8493); }
+.stage-head { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px 14px; align-items: end; }
+.stage-caption { grid-column: 1/-1; display: flex; align-items: center; gap: 12px; }
+.stage-badge { display: inline-flex; align-items: center; gap: 8px; color: var(--stage-accent); font: 650 13px/1.5 var(--sans,sans-serif); }
+.stage-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.step-count { margin-inline-start: auto; color: var(--stage-muted); font: 12px/1.5 var(--mono,monospace); }
+.what { margin: 0; color: var(--stage-text); font: 730 21px/1.35 var(--sans,sans-serif); overflow-wrap: anywhere; }
+.pct { color: var(--stage-accent); font: 650 30px/1 var(--mono,monospace); font-variant-numeric: tabular-nums; }
+.stage-meter { height: 6px; overflow: hidden; border-radius: 999px; background: var(--stage-line); }
+.stage-meter i {
+  display: block; width: 100%; height: 100%; border-radius: inherit; transform-origin: left;
+  background: linear-gradient(90deg,var(--stage-violet),var(--stage-accent));
+  transition: transform .45s cubic-bezier(.2,0,.25,1);
 }
-.stage-badge::before { width: 7px; height: 7px; border-radius: 50%; background: var(--stage-accent); content: ""; }
-.what { margin: 0 0 20px; color: var(--stage-text); font-weight: 800; font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
-.hint, .time { margin: 7px 0 0; font-size: 13px; line-height: 1.6; color: var(--stage-muted); }
-.hint:empty, .time:empty { display: none; }
-.steps { position: relative; display: grid; grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
-.steps li { position: relative; z-index: 1; display: flex; align-items: center; flex-direction: column; gap: 8px; text-align: center; }
-.steps .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--stage-line); transition: background .2s; }
-.steps .name { max-width: 10em; padding: 0 2px; font-size: 12px; line-height: 1.45; color: var(--stage-muted); }
-.steps li[data-s="done"] .dot { background: var(--success, var(--stage-cyan)); }
-.steps li[data-s="now"] .dot { background: var(--stage-cyan); outline: 2px solid color-mix(in srgb, var(--stage-cyan) 28%, transparent); outline-offset: 2px; }
-.steps li[data-s="now"] .name, .steps li[data-s="done"] .name { color: var(--stage-text); font-weight: 650; }
-.steps li[data-s="failed"] .dot { background: var(--stage-accent); }
-.steps li[data-s="failed"] .name { color: var(--stage-accent); }
-.rail { position: absolute; inset-inline: calc(50% / var(--n, 4)); top: 5px; height: 2px; background: var(--stage-line); overflow: hidden; }
-.rail i, .stage-meter i { display: block; height: 100%; width: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--stage-violet), var(--stage-cyan)); transform-origin: left; transform: scaleX(0); transition: transform .65s ease; }
-.stage-meter { height: 5px; margin: 18px 0 0; overflow: hidden; border-radius: 999px; background: var(--stage-line); }
-.stage-meter[data-mode="indeterminate"] i { width: 32%; animation: meter-sweep 1.6s cubic-bezier(.6,0,.4,1) infinite; }
-.stage-meter[data-mode="unknown"] i { width: 0; transform: none; opacity: 0; }
-.stage:not([data-state="running"]) :is(.rail i, .stage-meter i) { background: var(--stage-accent); }
-.now { margin: 14px 0 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 16px; line-height: 1.5; color: var(--stage-text); }
-.now b { min-width: 0; overflow-wrap: anywhere; white-space: pre-line; font-weight: 650; }
-.now .pct { font: 700 15px/1 var(--mono, monospace); color: var(--stage-accent); }
-.stage[data-state="failed"] .now b { color: var(--stage-accent); }
+.stage-meter[data-mode="indeterminate"] i { width: 32%; animation: meter-sweep 1.5s ease-in-out infinite; }
+.stage-meter[data-mode="unknown"] i { width: 0; opacity: 0; }
+.stage:not([data-state="running"]) .stage-meter i { background: var(--stage-accent); }
+.time, .hint, .now, .notes p { margin: 0; color: var(--stage-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .time { font-variant-numeric: tabular-nums; }
-.stage-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.notes p { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--stage-line); border-radius: 14px; background: var(--glass, transparent); color: var(--stage-text); font-size: 13px; line-height: 1.6; }
-@keyframes meter-sweep { from { transform: translateX(-125%); } to { transform: translateX(440%); } }
-@media (prefers-reduced-motion: reduce) { .rail i, .stage-meter i { transition: none; } .stage-meter[data-mode="indeterminate"] i { animation: none; transform: none; } }
+.steps {
+  list-style: none; display: grid; gap: 0; margin: 2px 0 0; padding: 4px 0;
+  border-block: 1px solid var(--stage-line);
+}
+.steps li { display: grid; grid-template-columns: 17px minmax(0,1fr) auto; align-items: center; column-gap: 10px; min-height: 34px; padding: 4px 0; box-sizing: border-box; }
+.steps .dot {
+  display: grid; place-content: center; justify-self: center; width: 12px; height: 12px;
+  box-sizing: border-box; border: 1px solid var(--stage-muted); border-radius: 50%;
+}
+.steps .name { color: var(--stage-muted); font: 500 14px/1.5 var(--sans,sans-serif); overflow-wrap: anywhere; }
+.step-status { color: var(--stage-muted); font-size: 12px; white-space: nowrap; }
+.steps li[data-s="now"] .name { color: var(--stage-text); font-weight: 750; }
+.steps li[data-s="now"] .step-status { color: var(--stage-accent); }
+.steps li[data-s="now"] .dot { border-color: var(--stage-accent); }
+.steps li[data-s="now"] .dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--stage-accent); }
+.steps li[data-s="done"] .dot { border-color: transparent; }
+.steps li[data-s="done"] .dot::after { content: ""; width: 9px; height: 5px; border: solid var(--success,#64e8b6); border-width: 0 0 2px 2px; transform: rotate(-45deg); }
+.steps li:is([data-s="failed"],[data-s="stopped"]) :is(.dot,.step-status) { color: var(--stage-accent); border-color: var(--stage-accent); }
+.stage[data-state="failed"] .now { color: var(--stage-accent); white-space: pre-line; }
+.now { color: var(--stage-text); }
+.notes { display: grid; gap: 8px; }
+.stage-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@keyframes meter-sweep { from { transform: translateX(-110%); } to { transform: translateX(315%); } }
+@media (prefers-reduced-motion: reduce) {
+  .stage-meter i { transition: none; }
+  .stage-meter[data-mode="indeterminate"] i { animation: none; transform: none; }
+}
 """
 
 
@@ -412,33 +449,34 @@ def _file_url(path) -> str:
     return "/gradio_api/file=" + quote(str(path).replace("\\", "/"), safe="/:")
 
 
-def _track(path, download_name: str, label: str = "", main: bool = False, lazy: bool = False) -> str:
+def _track(path, download_name: str, label: str = "", main: bool = False) -> str:
     """One player with its download link. The browser's own player: press play, click anywhere on the bar."""
     url = html.escape(_file_url(path), quote=True)
     name = f'<span class="track-name">{html.escape(label)}</span>' if label else ""
-    initial_state = "idle" if lazy else "loading"
-    initial_message = "点击播放后读取音频信息" if lazy else "正在读取音频信息…"
-    preload = "none" if lazy else "metadata"
-    return (f'<div class="track{" track-main" if main else ""}" data-audio-state="{initial_state}">{name}'
-            f'<audio data-lazy="{str(lazy).lower()}" controls preload="{preload}" controlslist="nodownload noplaybackrate" src="{url}"></audio>'
-            f'<span class="track-status" role="status" aria-live="polite"><span class="track-message">{initial_message}</span>'
+    return (f'<div class="track{" track-main" if main else ""}" data-audio-state="loading">{name}'
+            f'<audio controls preload="metadata" controlslist="nodownload noplaybackrate" src="{url}"></audio>'
+            f'<span class="track-status" role="status" aria-live="polite"><span class="track-message">正在读取音频信息…</span>'
             f'<button type="button" class="track-retry" hidden>重试</button></span>'
-            f'<a class="save" href="{url}" download="{html.escape(download_name, quote=True)}">下载</a></div>')
+            f'<a class="save" href="{url}" download="{html.escape(download_name, quote=True)}">'
+            f'{"下载成品" if main else "下载"}</a></div>')
 
 
 def _result_html(item: dict, title: str) -> str:
     """What is shown when a cover is finished: the cover, and the separate stems behind a fold."""
     if not item.get("mix"):
         return ""
-    parts = [("只有我的人声", item.get("converted"), "我的人声"), ("原唱的人声", item.get("vocals"), "原唱人声"),
+    parts = [("已转换的声部" if item.get("duet_male") else "只有我的人声", item.get("converted"), "翻唱人声"),
+             ("原唱的人声", item.get("vocals"), "原唱人声"),
              ("伴奏", item.get("instrumental"), "伴奏")]
+    for key, name in (("duet_male", "男声原分轨"), ("duet_female", "女声原分轨"),
+                      ("duet_male_converted", "转换后的男声部"), ("duet_female_converted", "转换后的女声部"),
+                      ("duet_preserved", "保留的原唱部分")):
+        if item.get(key):
+            parts.append((name, item[key], name))
     rows = "".join(_track(file, f"{title} {suffix}.wav", label) for label, file, suffix in parts if file)
     fold = f'<details class="parts"><summary>分开听</summary>{rows}</details>' if rows else ""
     return (f'<section class="result"><div class="result-heading"><span class="eyebrow">制作完成</span>'
-            f'<h3>{html.escape(title)}</h3><p>试听你的作品，也可以单独下载人声与伴奏。</p></div>'
-            f'<div class="result-actions result-primary"><a class="save" href="{html.escape(_file_url(item["mix"]), quote=True)}" '
-            f'download="{html.escape(title, quote=True)} 翻唱.wav">下载成品</a>'
-            f'<span class="result-tip">成品已保存到作品库</span></div>'
+            f'<h3>{html.escape(title)}</h3><p>成品已保存到作品库</p></div>'
             f'{_track(item["mix"], f"{title} 翻唱.wav", "最终成品", main=True)}{fold}</section>')
 
 
@@ -473,6 +511,12 @@ def _task_snapshot(token):
 
 def _publish_cover(task, item, *, finished=False):
     with _COVER_TASKS_LOCK:
+        # Failure and cancellation may arrive with only a message. Keep the
+        # last measured position so a refreshed page shows where the run ended.
+        if finished and item.get("progress", {}).get("state") in {"stopped", "failed"}:
+            previous = task.item.get("progress", {})
+            position = {key: previous[key] for key in ("steps", "step", "overall", "elapsed") if key in previous}
+            item = {**item, "progress": {**position, **item["progress"]}}
         task.item = item
         task.finished = finished
         task.updated = time.monotonic()
@@ -534,7 +578,8 @@ def _cover_view(snapshot, blocked_reason=""):
     progress = {**item.get("progress", {}), "title": title, "run": item.get("run")}
     if not finished:
         progress["state"] = "running"
-        progress["hint"] = "正在停止并释放资源，请稍等。" if cancelling else "可以切换页面或刷新；任务会继续，完成后可在作品库找到。"
+        progress["stopping"] = cancelling
+        progress["hint"] = "正在释放资源…" if cancelling else "可切换页面，成品将保存至作品库。"
         if cancelling:
             progress["detail"] = "正在停止"
         return (progress, gr.skip(), shown(), gr.update(value="", visible=False), hidden(),
@@ -554,11 +599,16 @@ def _cover_view(snapshot, blocked_reason=""):
 
 
 def _start_cover(song, model, pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate,
-                 current_task=""):
+                 current_task="", duet_mode="off", duet_source="auto", duet_second_model=None,
+                 duet_male_stem=None, duet_female_stem=None, duet_swap=False, duet_dereverb=False):
     """Start a task immediately; /cover returns a task token, not a long stream."""
     if not song:
         raise gr.Error("先选一首歌。", title="还不能开始", print_exception=False)
-    voice_notice, reason = _cover_requirements(song, model)
+    voices = _voices()
+    voice_notice, reason = _cover_requirements(song, model, voices)
+    if not reason:
+        voice_notice, reason = _duet_requirements(duet_mode, duet_source, duet_second_model,
+                                                 duet_male_stem, duet_female_stem, voices)
     if reason:
         raise gr.Error(voice_notice, title="还不能开始", print_exception=False)
     previous = _task_snapshot(current_task)
@@ -571,6 +621,11 @@ def _start_cover(song, model, pitch_mode, backing, clarity, reverb, vocal_gain, 
     try:
         arguments = (song, model, _index_for(model), 0, index_rate, vocal_gain, music_gain, False,
                      refine, backing, clarity, reverb, pitch_mode)
+        if duet_mode != "off":
+            second = duet_second_model if duet_mode == "both" and duet_second_model != SAME_VOICE else None
+            manual = duet_source == "stems"
+            arguments += (duet_mode, bool(duet_swap) and not manual, second,
+                          duet_male_stem if manual else None, duet_female_stem if manual else None, duet_dereverb)
         task = _CoverTask(uuid.uuid4().hex, _song_title(song))
         task.item = {"progress": {"state": "running", "steps": ["准备歌曲"], "step": 0,
                                   "overall": 0, "elapsed": 0, "detail": "任务已接收"}}
@@ -629,6 +684,24 @@ def _cover_preparation(song, model):
             f'<span>本次任务</span><b>{status}</b></div>')
 
 
+def _duet_controls(mode, source):
+    duet = mode != "off"
+    manual = source == "stems"
+    first_label = {"male": "男声使用的音色", "female": "女声使用的音色", "both": "男声使用的音色"}
+    return (gr.update(visible=duet), gr.update(visible=duet and manual),
+            gr.update(visible=duet and not manual), gr.update(visible=mode == "both"),
+            gr.update(label=first_label.get(mode, "我的音色")),
+            gr.update(visible=not duet), gr.update(visible=not duet),
+            gr.update(info="只调整转换声部的空间感；0 为干声。" if duet else "1 接近原曲的空间感，0 不添加混响。"),
+            gr.update(visible=duet))
+
+
+def _duet_second_voices(current):
+    choices = [("与男声使用同一音色", SAME_VOICE), *[pair for pair in _voices() if not _is_demo_voice(pair[1], [pair])]]
+    selected = current if any(value == current for _, value in choices) else SAME_VOICE
+    return gr.update(choices=choices, value=selected)
+
+
 @lru_cache(maxsize=8)
 def _recent_waveform(path: str, mtime_ns: int, file_size: int):
     """Cache by file revision and sample at most 72 short windows across the mix."""
@@ -655,10 +728,13 @@ def _recent_waveform(path: str, mtime_ns: int, file_size: int):
             segments.append(f"M{4 * index + 2},{24 - height:.1f}v{2 * height:.1f}")
     seconds = int(duration)
     end_time = f"{seconds // 60}:{seconds % 60:02d}" if seconds else f"{duration:.2f} 秒"
-    return (f'<figure class="monitor-waveform"><svg viewBox="0 0 {width} 48" preserveAspectRatio="none" '
+    return (f'<figure class="monitor-waveform"><div class="wave-scrubber">'
+            f'<svg viewBox="0 0 {width} 48" preserveAspectRatio="none" '
             f'aria-hidden="true"><path class="wave-base" d="M0,24H{width}"/>'
             f'<path class="wave-levels" d="{" ".join(segments)}"/></svg>'
-            f'<figcaption><span aria-hidden="true">0:00</span><span>时长 {end_time}</span></figcaption></figure>')
+            f'<input class="wave-seek" type="range" min="0" max="{duration:.3f}" step="0.1" '
+            f'value="0" disabled aria-label="最近作品试听位置"></div>'
+            f'<figcaption><span class="wave-time">0:00</span><span>时长 {end_time}</span></figcaption></figure>')
 
 
 def _recent_cover_preview():
@@ -696,11 +772,27 @@ def _cover_tab(cover_tab=None):
                             '<small>MP3 / FLAC / WAV / M4A</small></div>', container=False)
                     song = gr.File(label="原曲文件", file_types=["audio"], type="filepath",
                                    show_label=False, elem_id="song-drop", height=84)
+                mode = gr.Dropdown(label="翻唱范围", choices=DUET_MODES, value="off",
+                                   filterable=False, interactive=True, elem_id="duet-mode")
+                with gr.Column(visible=False, min_width=0, elem_id="duet-routing") as routing:
+                    source = gr.Radio(label="对唱人声来源", choices=[("从歌曲自动分离", "auto"), ("使用已有分轨", "stems")],
+                                      value="auto", elem_id="duet-source")
+                swap = gr.Checkbox(label="交换自动分出的男、女声部", value=False, visible=False, elem_id="duet-swap",
+                                   info="如果试听发现分反了，可交换后重新制作。重叠、同音或音色相近时可能串音。")
+                with gr.Column(visible=False, min_width=0, elem_id="duet-uploads") as uploads:
+                    gr.HTML('<p class="field-note">两轨需与原曲从同一时间起点导出，保留休止处的静音和完整曲长。</p>',
+                            container=False)
+                    with gr.Row():
+                        male_stem = gr.File(label="原男声分轨", file_types=[".wav", ".flac"], type="filepath", height=95)
+                        female_stem = gr.File(label="原女声分轨", file_types=[".wav", ".flac"], type="filepath", height=95)
                 with gr.Row(elem_id="voice-picker-row"):
                     model = gr.Dropdown(label="我的音色", choices=voices, value=selected_voice,
-                                        interactive=True, elem_id="voice-pick", scale=5,
+                                        filterable=False, interactive=True, elem_id="voice-pick", scale=5,
                                         info=None if voices else "还没有音色？到“我的声音”录音并训练，完成后即可选择。")
                     refresh_voice = gr.Button("刷新音色", elem_id="refresh-voices", size="sm", scale=0, min_width=84)
+                second = gr.Dropdown(label="女声使用的音色", choices=_duet_second_voices(SAME_VOICE)["choices"],
+                                     value=SAME_VOICE, filterable=False, visible=False, interactive=True,
+                                     elem_id="duet-second-voice")
                 voice_notice_view = gr.HTML(_studio_alert_html(voice_notice), visible=bool(voice_notice),
                                             elem_id="voice-required", container=False)
                 with gr.Row(elem_id="cover-settings-actions"):
@@ -715,7 +807,7 @@ def _cover_tab(cover_tab=None):
                         backing = gr.Radio(choices=BACKING_CHOICES, value=defaults[1], label="和声处理",
                                            info="保留原唱和声通常更自然，主唱仍会转换为你的声音。")
                         clarity = gr.Slider(0, 1, value=defaults[2], step=0.05, label="人声清晰度",
-                                            info="歌词不清楚可调高；声音偏尖、偏薄可调低。")
+                                            info="调高可补强较弱的字头和气声；齿音偏刺时调低。")
                     with gr.Accordion("混音与精细调节", open=False, elem_id="advanced-voice-settings"):
                         gr.HTML('<p class="field-note">只在需要时调整。人声和伴奏响度分别控制，0 表示保持原曲响度。</p>',
                                 container=False)
@@ -726,8 +818,10 @@ def _cover_tab(cover_tab=None):
                         refine = gr.Checkbox(label="精细处理主唱", value=defaults[6], interactive=refine_ready,
                                              info="先分离主唱并去除混响，减少和声干扰。处理时间稍长。" if refine_ready
                                              else "请先安装主唱分离与去混响模型。")
+                        duet_dry = gr.Checkbox(label="转声前去除对唱声部的混响", value=False, visible=False,
+                                               info="字尾混在一起时可试用。仅处理要翻唱的声部，需要重新制作。")
                         index_rate = gr.Slider(0, 1, value=defaults[7], step=0.05, label="音色检索强度",
-                                               info="越高越贴近训练录音，但可能影响咬字；建议从 0.25 开始。")
+                                               info="默认 0.25。字音含混时可试 0.10 并重新翻唱；音色相似度可能变化。")
                     reset_settings = gr.Button("恢复默认设置", elem_id="reset-cover", size="sm")
                 settings_summary = gr.Markdown(
                     _settings_summary(*defaults), elem_id="cover-settings-summary")
@@ -744,24 +838,36 @@ def _cover_tab(cover_tab=None):
             stop = gr.Button("停止任务", elem_id="stop-cover", size="sm", visible=False)
             result = gr.HTML("", visible=False, elem_id="cover-result", container=False)
             again = gr.Button("继续制作", elem_id="again", visible=False)
-    gr.on([song.change, model.change], _cover_preparation, inputs=[song, model], outputs=[preparation],
-          queue=False, show_progress="hidden", api_name=False)
+    quiet = dict(queue=False, show_progress="hidden", api_name=False)
+    gr.on([mode.change, source.change], _duet_controls, inputs=[mode, source],
+          outputs=[routing, uploads, swap, second, model, backing, refine, reverb, duet_dry], **quiet)
     if cover_tab is not None:
         cover_tab.select(_recent_cover_preview, outputs=[recent], queue=False, show_progress="hidden", api_name=False)
     task_id = gr.BrowserState("", storage_key="aicoversong-cover-task")
-    refresh_voice.click(_refresh_voices, outputs=[model], queue=False, show_progress="hidden")
-    gr.on([song.change, model.change], _cover_input_change, inputs=[song, model, task_id],
-          outputs=[voice_notice_view, blocked_reason, start], queue=False, show_progress="hidden", api_name=False)
+    def input_status(song, model, task_id, mode, source, second, male, female):
+        updates = _cover_input_change(song, model, task_id, mode, source, second, male, female)
+        return (*updates, _cover_preparation(song, model) if not updates[1] else
+                f'<div class="monitor-readiness" role="status"><span>本次任务</span><b>{html.escape(updates[1])}</b></div>')
+
+    ready_inputs = [song, model, task_id, mode, source, second, male_stem, female_stem]
+    ready_outputs = [voice_notice_view, blocked_reason, start, preparation]
+    refresh_voice.click(_refresh_voices, inputs=[model], outputs=[model], queue=False, show_progress="hidden").then(
+        _duet_second_voices, inputs=[second], outputs=[second], **quiet).then(
+        input_status, inputs=ready_inputs, outputs=ready_outputs, **quiet)
+    gr.on([control.change for control in (song, model, mode, source, second, male_stem, female_stem)],
+          input_status, inputs=ready_inputs, outputs=ready_outputs, **quiet)
     settings_inputs = [pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate]
-    for control in settings_inputs:
-        control.change(_settings_summary, inputs=settings_inputs, outputs=[settings_summary],
+    for control in [*settings_inputs, mode]:
+        control.change(_settings_summary, inputs=[*settings_inputs, mode], outputs=[settings_summary],
                       queue=False, show_progress="hidden")
-    reset_settings.click(lambda: (*_default_cover_settings(refine_ready), _settings_summary(*_default_cover_settings(refine_ready))),
-                         outputs=settings_inputs + [settings_summary], queue=False, show_progress="hidden")
+    reset_settings.click(lambda mode: (*defaults, _settings_summary(*defaults, mode), False),
+                         inputs=[mode], outputs=settings_inputs + [settings_summary, duet_dry],
+                         queue=False, show_progress="hidden")
     outputs = [progress, form, stage, result, again, start, stop, empty]
     poll = gr.Timer(1.0, active=False)
     start.click(_start_cover,
-                inputs=[song, model, pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate, task_id],
+                inputs=[song, model, pitch_mode, backing, clarity, reverb, vocal_gain, music_gain, refine, index_rate, task_id,
+                        mode, source, second, male_stem, female_stem, swap, duet_dry],
                 outputs=outputs + [task_id, poll], queue=False, trigger_mode="multiple", show_progress="hidden",
                 api_name="cover")
     poll.tick(_poll_cover, inputs=[task_id, blocked_reason], outputs=outputs + [poll], queue=False,
@@ -775,7 +881,7 @@ def _cover_tab(cover_tab=None):
     again.click(_again, inputs=[task_id, blocked_reason], outputs=outputs + [task_id, poll], queue=False,
                 show_progress="hidden", api_name=False).then(
                     _recent_cover_preview, outputs=[recent], queue=False, show_progress="hidden", api_name=False)
-    return model
+    return model, second
 
 
 # --------------------------------------------------------------------------
@@ -819,6 +925,44 @@ window.__coverMicSubscriptions?.abort();
 const controller = new AbortController();
 window.__coverMicSubscriptions = controller;
 const options = {signal: controller.signal};
+const recorder = document.getElementById('cover-mic-recorder');
+let preferredInput = '';
+function labelRecorder() {
+  const select = recorder?.querySelector('select.mic-select');
+  if (select) {
+    if (preferredInput && Array.from(select.options).some(item => item.value === preferredInput)) {
+      select.value = preferredInput;
+    }
+    Array.from(select.options).forEach((item, index) => {
+      if (!item.label.trim()) item.label = '输入设备 ' + (index + 1);
+    });
+    const name = select.selectedOptions[0]?.label || '选择麦克风';
+    select.title = name;
+    select.setAttribute('aria-label', '输入设备');
+    select.dataset.selectedMic = select.value === preferredInput ? preferredInput : '';
+  }
+  const pause = recorder?.querySelector('.pause-button');
+  if (pause) {
+    pause.title = '暂停录音';
+    pause.setAttribute('aria-label', pause.title);
+  }
+}
+if (recorder) {
+  labelRecorder();
+  recorder.addEventListener('change', event => {
+    if (event.target.matches('select.mic-select')) {
+      preferredInput = event.target.value;
+      labelRecorder();
+    }
+  }, options);
+  const observer = new MutationObserver(changes => {
+    if (changes.some(change => Array.from(change.addedNodes).some(node =>
+      node.nodeType === 1 && (node.matches('select.mic-select, option, .pause-button') ||
+      node.querySelector('select.mic-select, .pause-button'))))) labelRecorder();
+  });
+  observer.observe(recorder, {childList: true, subtree: true});
+  controller.signal.addEventListener('abort', () => observer.disconnect(), {once: true});
+}
 let revision = 0;
 let permission;
 async function inspect() {
@@ -839,7 +983,10 @@ if (!devices.__coverRawMicrophone) {
   const original = devices.getUserMedia.bind(devices);
   devices.getUserMedia = async (constraints) => {
     if (!constraints?.audio) return original(constraints);
-    const audio = constraints.audio === true ? {} : constraints.audio;
+    const audio = constraints.audio === true ? {} : {...constraints.audio};
+    // In Gradio 6.20 the selector lists inputs but Wavesurfer starts with {audio:true}.
+    const selected = document.querySelector('#cover-mic-recorder select.mic-select')?.dataset.selectedMic;
+    if (selected && !audio.deviceId) audio.deviceId = {exact: selected};
     try {
       const stream = await original({...constraints, audio: {...audio,
         noiseSuppression: false, echoCancellation: false, autoGainControl: false}});
@@ -928,18 +1075,13 @@ def _discard_take(index):
 
 def _take_action_state(audio_path):
     enabled = bool(audio_path)
-    return (gr.update(interactive=enabled), gr.update(interactive=enabled),
+    return (gr.update(interactive=enabled, value="试听"), gr.update(interactive=enabled),
             gr.update(interactive=enabled), gr.update(interactive=enabled),
             _studio_alert_html("录音已就绪，可以试听、保存或重录。", "info") if enabled else "")
 
 
 def _recording_started():
     return _studio_alert_html("正在录音。读完或唱完后点停止，再试听确认。", "info")
-
-
-def _preview_take(audio_path):
-    return _studio_alert_html("正在试听这段录音。确认声音清楚、没有爆音后再保存；不满意可以直接重录。"
-                              if audio_path else "还没有录音，请先点击麦克风录音。", "info")
 
 
 def _training_gate(agreed):
@@ -978,7 +1120,7 @@ def _train_worker(agreed):
     first = True
     for snapshot in trainer.train_voice(agreed):
         if snapshot["state"] == "running":
-            snapshot = {**snapshot, "hint": "训练要一到两个小时。可以先去忙别的，别关这个网页，也别关那个黑色的窗口。"}
+            snapshot = {**snapshot, "hint": "训练期间请保持网页和服务窗口开启。"}
             yield (snapshot, gr.update(visible=False) if first else gr.skip(),
                    gr.update(visible=True) if first else gr.skip())
             first = False
@@ -1030,9 +1172,9 @@ def _voice_tab():
         terms = gr.Checkbox(label="这些录音都是我自己的声音，我不会拿它冒充别人", value=False,
                             info="开始前请阅读并遵守 [Applio 使用条款](https://github.com/IAHispano/Applio/blob/3.7.1/TERMS_OF_USE.md)。")
         train = gr.Button("开始训练", variant="primary", interactive=False, elem_id="start-train")
-    with gr.Column(visible=False, elem_id="train-stage") as train_stage:
-        cancel = gr.Button("停止训练", size="sm", elem_id="stop-train")
     train_progress = _progress_view("train-progress")
+    with gr.Column(visible=False, elem_id="train-stage") as train_stage:
+        cancel = gr.Button("停止训练", size="sm", elem_id="stop-train", scale=0)
     train_gate = gr.HTML(_training_gate(False), elem_id="training-gate", container=False)
 
     recording.clear(_clear_take, inputs=[count],
@@ -1040,8 +1182,11 @@ def _voice_tab():
     recording.start_recording(_recording_started, outputs=[feedback], queue=False, show_progress="hidden")
     recording.change(_take_action_state, inputs=[recording], outputs=[preview, retake, clear, save, feedback],
                      queue=False, show_progress="hidden")
-    preview.click(_preview_take, inputs=[recording], outputs=[feedback], queue=False, show_progress="hidden",
-                  js="""() => { const player = document.querySelector('#cover-mic-recorder audio'); if (player) { player.currentTime = 0; player.play().catch(() => {}); } }""")
+    preview.click(fn=None, js="""() => document.querySelector('#cover-mic-recorder .play-pause-button')?.click()""",
+                  queue=False, show_progress="hidden")
+    recording.play(lambda: gr.update(value="暂停试听"), outputs=[preview], queue=False, show_progress="hidden")
+    gr.on([recording.pause, recording.stop], lambda: gr.update(value="试听"),
+          outputs=[preview], queue=False, show_progress="hidden")
     retake.click(_retake_take, inputs=[count], outputs=[recording, prompt, preview, retake, clear, save, feedback], queue=False,
                  show_progress="hidden")
     clear.click(_discard_take, inputs=[count], outputs=[recording, prompt, preview, retake, clear, save, feedback], queue=False,
@@ -1077,7 +1222,7 @@ def _song_title(source: str) -> str:
     return trimmed or title
 
 
-def _history_rows(rows, query="", order="newest"):
+def _history_rows(rows, query="", order="newest", *, limit=60):
     needle = (query or "").strip().casefold()
     if needle:
         rows = [row for row in rows if needle in row["title"].casefold() or needle in Path(row["source"]).name.casefold()]
@@ -1085,7 +1230,30 @@ def _history_rows(rows, query="", order="newest"):
         rows = list(reversed(rows))
     elif order == "title":
         rows = sorted(rows, key=lambda row: row["title"].casefold())
-    return rows[:60]
+    return rows[:limit]
+
+
+@lru_cache(maxsize=256)
+def _cover_duration(path: str, mtime_ns: int, size: int) -> str:
+    """Read just the WAV header; replace cached durations when the file changes."""
+    with sf.SoundFile(path) as audio:
+        seconds = int(audio.frames / audio.samplerate)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _history_duration(path):
+    try:
+        stat = Path(path).stat()
+        return _cover_duration(path, stat.st_mtime_ns, stat.st_size)
+    except (ValueError, OSError, sf.LibsndfileError):
+        return ""
+
+
+# Lucide static v0.468.0 (ISC), see licenses/Lucide-ISC.txt.
+_WORK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">'
+_PLAY_ICON = _WORK_ICON + '<polygon points="6 3 20 12 6 21 6 3"/></svg>'
+_PAUSE_ICON = _WORK_ICON + '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></svg>'
+_DOWNLOAD_ICON = _WORK_ICON + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>'
 
 
 def _history_html(rows, total, selected=None):
@@ -1102,13 +1270,19 @@ def _history_html(rows, total, selected=None):
         active = row["run_id"] == selected
         active_attr = "true" if active else "false"
         name = html.escape(row["title"], quote=True)
+        run_id = html.escape(row["run_id"], quote=True)
+        url = html.escape(_file_url(row["cover"]), quote=True)
+        duration = _history_duration(row["cover"])
+        duration_markup = f'<span class="work-duration" aria-label="时长 {duration}">{duration}</span>' if duration else ""
         items.append(
             f'<li class="history-entry" data-selected="{active_attr}"><div class="history-entry-heading">'
-            f'<div class="meta"><b>{name}</b><span>{html.escape(when)}</span>{tag}</div>'
-            f'<button type="button" class="history-pick" data-work="{html.escape(row["run_id"], quote=True)}" '
+            f'<div class="meta"><b title="{name}">{name}</b><span>{html.escape(when)}</span>{duration_markup}{tag}</div>'
+            f'<button type="button" class="history-pick" data-work="{run_id}" '
             f'aria-label="管理：{name}" aria-controls="history-inspector" aria-expanded="{active_attr}">'
             f'{"收起" if active else "管理"}</button></div>'
-            + _track(row["cover"], f'{row["title"]} 翻唱.wav', lazy=True) + "</li>")
+            f'<div class="work-actions"><button type="button" class="work-play" data-preview="{run_id}" '
+            f'aria-controls="library-audio" aria-label="试听：{name}">{_PLAY_ICON}{_PAUSE_ICON}<span>试听</span></button>'
+            f'<a class="save" href="{url}" download="{name} 翻唱.wav" aria-label="下载：{name}">{_DOWNLOAD_ICON}下载</a></div></li>')
     return (f'<p class="history-note" role="status">显示 {len(rows)} / {total} 首作品</p>'
             '<ul class="history" aria-label="作品列表">' + "".join(items) + "</ul>")
 
@@ -1129,35 +1303,188 @@ element.addEventListener('click', (event) => {
 """
 
 
-def _trash_choices():
+# This component lives outside the regenerated card list so sorting and searching
+# don't interrupt playback. Only an explicit user action assigns a media URL.
+_LIBRARY_PLAYER = """
+<section class="library-deck" hidden aria-label="作品试听">
+  <div class="deck-info"><span class="deck-state" role="status"></span><strong class="deck-title"></strong></div>
+  <audio id="library-audio" controls preload="none" aria-label="作品试听"></audio>
+  <button type="button" class="deck-retry" hidden>重试</button>
+  <button type="button" class="deck-close" aria-label="关闭试听" title="关闭试听">关闭</button>
+</section>
+"""
+
+_LIBRARY_PLAYER_JS = """
+const deck = element.querySelector('.library-deck');
+const library = element.closest('#history-collection');
+const view = library.querySelector('#history-view');
+const player = deck.querySelector('audio');
+const name = deck.querySelector('.deck-title');
+const status = deck.querySelector('.deck-state');
+const retry = deck.querySelector('.deck-retry');
+let active = '';
+
+function updateCards() {
+  view.querySelectorAll('.work-play').forEach((button) => {
+    const card = button.closest('.history-entry');
+    const selected = button.dataset.preview === active;
+    const playing = selected && !player.paused && !player.ended;
+    const label = playing ? '暂停' : '试听';
+    const title = card.querySelector('.meta b').textContent;
+    if (selected) name.textContent = title;
+    card.dataset.previewActive = String(selected);
+    button.dataset.playing = String(playing);
+    button.setAttribute('aria-label', label + '：' + title);
+    const caption = button.querySelector('span');
+    if (caption.textContent !== label) caption.textContent = label;
+  });
+}
+function announce(next) {
+  if (!active) return;
+  status.textContent = next;
+  retry.hidden = next !== '读取失败';
+  updateCards();
+}
+function start() {
+  const requested = active;
+  player.play().catch((error) => {
+    if (requested === active && error.name !== 'AbortError') announce('读取失败');
+  });
+}
+view.addEventListener('click', (event) => {
+  const button = event.target.closest('.work-play');
+  if (!button) return;
+  if (active === button.dataset.preview && !player.paused) { player.pause(); return; }
+  if (active !== button.dataset.preview) {
+    active = button.dataset.preview;
+    const card = button.closest('.history-entry');
+    player.src = card.querySelector('.work-actions a').href;
+    deck.hidden = false;
+    announce('正在载入');
+  } else if (player.error) {
+    player.load();
+    announce('正在载入');
+  }
+  start();
+});
+player.addEventListener('playing', () => announce('正在试听'));
+player.addEventListener('waiting', () => { if (!player.paused) announce('正在载入'); });
+player.addEventListener('pause', () => { if (!player.ended && !player.error && player.paused) announce('已暂停'); });
+player.addEventListener('ended', () => announce('试听结束'));
+player.addEventListener('error', () => { if (player.hasAttribute('src')) announce('读取失败'); });
+retry.addEventListener('click', () => { announce('正在载入'); player.load(); start(); });
+function closePlayer(returnFocus) {
+  const sourceButton = Array.from(view.querySelectorAll('.work-play')).find((b) => b.dataset.preview === active);
+  active = '';
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  deck.hidden = true;
+  updateCards();
+  if (returnFocus) {
+    (sourceButton || document.querySelector('#history-search textarea') || document.querySelector('#history-refresh'))
+      ?.focus({preventScroll: true});
+  }
+}
+deck.querySelector('.deck-close').addEventListener('click', () => closePlayer(true));
+deck.addEventListener('studio-delete-works', (event) => {
+  if (event.detail.includes(active)) closePlayer(false);
+});
+// Gradio replaces the list's HTML when a filter, name or sort order changes.
+const observer = new MutationObserver((changes) => {
+  if (!active || !changes.some(change => Array.from(change.addedNodes).some(n => n.nodeType === 1))) return;
+  updateCards();
+});
+observer.observe(view, {childList:true, subtree:true});
+"""
+
+
+def _work_choices(rows):
     return [(f'{row["title"]} · {row.get("created_at", "")[:16].replace("T", " ") or "日期未知"} · {row["run_id"][-4:]}',
-             row["run_id"]) for row in library.list_trashed(pipeline.OUTPUT)]
+             row["run_id"]) for row in rows]
 
 
-def _history_refresh(query="", order="newest", selected=None, trash_id=None, *, message=""):
+def _history_refresh(query="", order="newest", selected=None, bulk_ids=None, *, message="", tone="success"):
     # One inventory per refresh: the visible list and inspector always use the same snapshot.
     all_rows = library.list_works(pipeline.OUTPUT)
-    rows = _history_rows(all_rows, query, order)
+    matching = _history_rows(all_rows, query, order, limit=None)
+    rows = matching[:60]
     work = next((row for row in rows if row["run_id"] == selected), None)
     selected = work["run_id"] if work else None
-    trashed = _trash_choices()
-    trash_id = trash_id if any(value == trash_id for _, value in trashed) else None
+    requested = set(bulk_ids or [])
+    bulk_ids = [row["run_id"] for row in matching if row["run_id"] in requested]
     return (_history_html(rows, len(all_rows), selected), selected,
-            gr.update(choices=trashed, value=trash_id), _studio_alert_html(message, "success") if message else "",
-            gr.update(visible=bool(trashed), label=f"回收站 · {len(trashed)} 首"),
-            gr.update(interactive=trash_id is not None), gr.update(visible=bool(all_rows)),
-            *_history_selection(work))
+            _studio_alert_html(message, tone) if message else "", gr.update(visible=bool(all_rows)),
+            *_history_selection(work),
+            gr.update(choices=_work_choices(matching), value=bulk_ids, label=f"全选 / 清空当前筛选 · {len(matching)} 首"),
+            gr.update(visible=bool(matching)),
+            *_batch_actions(bulk_ids), gr.update(value=None, visible=False))
+
+
+def _batch_actions(ids):
+    count = len(ids or [])
+    suffix = f"（{count} 首）" if count else ""
+    return (gr.update(interactive=bool(count), value="打包下载" + suffix),
+            gr.update(interactive=bool(count), value="删除所选" + suffix))
+
+
+def _history_delete(ids, query="", order="newest", selected=None, bulk_ids=None):
+    if not ids:
+        return gr.skip()
+    deleted, failed = library.delete_selected(ids, output_root=pipeline.OUTPUT)
+    message = f"已删除 {len(deleted)} 首作品。"
+    if failed:
+        details = "；".join(f"{run_id}：{reason}" for run_id, reason in list(failed.items())[:3])
+        message += f"有 {len(failed)} 首未能删除。{details}"
+    return _history_refresh(query, order, selected, bulk_ids, message=message, tone="warning" if failed else "success")
+
+
+def _confirm_delete_js(bulk):
+    # Gradio State values are server-side. Use the identity rendered with the
+    # inspector title or the checkbox IDs captured by this click.
+    source = "bulkIds.slice()" if bulk else "(heading ? [heading.dataset.work] : [])"
+    return """(_unused, query, order, selected, bulkIds) => {
+  const heading = document.querySelector('#history-selection-note [data-work]');
+  const ids = SOURCE;
+  if (ids.length) {
+    const title = ids.length === 1 && heading?.dataset.work === ids[0] ? heading.querySelector('h3').textContent : '';
+    const target = title ? '《' + title + '》' : '所选的 ' + ids.length + ' 首作品';
+    if (window.confirm('永久删除' + target + '及其分轨？此操作无法撤销。')) {
+      document.querySelector('#history-player .library-deck')?.dispatchEvent(new CustomEvent('studio-delete-works', {detail: ids}));
+      return [ids, query, order, selected, bulkIds];
+    }
+  }
+  return [[], query, order, selected, bulkIds];
+}""".replace("SOURCE", source)
+
+
+def _history_export(ids):
+    from gradio.processing_utils import save_file_to_cache
+    from gradio.utils import get_upload_folder
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="aicoversong-export-") as directory:
+            archive = Path(directory) / "AIcoversong-works.zip"
+            library.export_selected(ids, archive, output_root=pipeline.OUTPUT)
+            cached = save_file_to_cache(archive, get_upload_folder())
+    except (OSError, ValueError) as exc:
+        raise gr.Error(str(exc), title="未能打包作品", print_exception=False) from exc
+    return gr.update(value=cached, visible=True)
 
 
 def _history_selection(work):
     if not work:
         return (gr.update(visible=False), "", "", 0, 0, 0.75, 1.0, "original")
     job = work["job"]
-    note = ('<div class="history-section-heading"><span class="eyebrow">作品管理</span>'
+    duet = job.get("duet_mode", "off") != "off"
+    note = (f'<div class="history-section-heading" data-work="{html.escape(work["run_id"], quote=True)}">'
+            '<span class="eyebrow">作品管理</span>'
             f'<h3>{html.escape(work["title"])}</h3></div>')
-    return (gr.update(visible=True), note, work["title"], float(job.get("vocal_gain", 0)),
+    return (gr.update(visible=True), note, work["title"],
+            gr.update(value=float(job.get("vocal_gain", 0)), label="翻唱声部音量（dB）" if duet else "人声音量（dB）"),
             float(job.get("instrumental_gain", 0)), float(job.get("clarity", 0.75)),
-            float(job.get("reverb", 1.0)), job.get("backing", "original"))
+            gr.update(value=float(job.get("reverb", 1.0)), info="只给转换后的声部添加混响。" if duet else None),
+            gr.update(value=job.get("backing", "original"), visible=not duet))
 
 
 def _history_pick(evt: gr.EventData):
@@ -1175,20 +1502,6 @@ def _history_rename(run_id, title, query="", order="newest"):
     return _history_refresh(query, order, run_id, message="作品名称已更新。")
 
 
-def _history_trash(run_id, query="", order="newest"):
-    if not run_id:
-        raise gr.Error("先选择要移入回收站的作品。", title="没有选中作品", print_exception=False)
-    library.trash_work(run_id, pipeline.OUTPUT)
-    return _history_refresh(query, order, trash_id=run_id, message="作品已移入回收站，可随时恢复。")
-
-
-def _history_restore(run_id, query="", order="newest"):
-    if not run_id:
-        raise gr.Error("先选择回收站中的作品。", title="没有选中作品", print_exception=False)
-    library.restore_work(run_id, pipeline.OUTPUT)
-    return _history_refresh(query, order, run_id, message="作品已恢复到作品库。")
-
-
 def _history_remix(run_id, vocal_gain, music_gain, clarity, reverb, backing, query="", order="newest"):
     if not run_id:
         raise gr.Error("先选择要重新混音的作品。", title="没有选中作品", print_exception=False)
@@ -1203,8 +1516,8 @@ def _history_remix(run_id, vocal_gain, music_gain, clarity, reverb, backing, que
 
 def _history_tab(history_tab):
     rows = library.list_works(pipeline.OUTPUT)
-    trashed = _trash_choices()
     selected = gr.State(None)
+    confirmed_ids = gr.JSON(value=[], visible=False)
     gr.HTML('<header class="page-hero"><h1>我的<span>作品库</span></h1></header>',
             container=False, apply_default_css=False)
     with gr.Row(elem_id="history-toolbar"):
@@ -1215,25 +1528,28 @@ def _history_tab(history_tab):
                                 value="newest", label="排序", filterable=False, scale=2, elem_id="history-order")
         refresh = gr.Button("刷新作品", size="sm", scale=0, min_width=92, elem_id="history-refresh")
     status = gr.HTML("", elem_id="history-feedback", container=False)
-    # Recovery is reachable even if every work has been moved out of the main list.
-    with gr.Accordion(f"回收站 · {len(trashed)} 首", visible=bool(trashed), open=False,
-                      elem_id="history-recovery") as recovery:
-        with gr.Row(elem_id="history-recovery-actions"):
-            restore_from = gr.Dropdown(choices=trashed, value=None, label="待恢复的作品",
-                                       elem_id="history-trash-selection", interactive=True, scale=4)
-            restore = gr.Button("恢复到作品库", size="sm", elem_id="history-restore", interactive=False, scale=0,
-                                min_width=110)
+    with gr.Accordion("批量管理", open=False, visible=bool(rows), elem_id="history-bulk") as bulk_panel:
+        bulk_ids = gr.CheckboxGroup(choices=_work_choices(rows), value=[], label=f"全选 / 清空当前筛选 · {len(rows)} 首",
+                                    show_select_all=True, interactive=True, elem_id="history-bulk-selection")
+        with gr.Row(elem_id="history-bulk-actions"):
+            export = gr.Button("打包下载", size="sm", interactive=False, scale=0, min_width=120)
+            bulk_delete = gr.Button("删除所选", elem_id="history-bulk-delete", size="sm",
+                                    interactive=False, scale=0, min_width=126)
+        archive = gr.File(label="下载成品 ZIP", type="filepath", interactive=False, visible=False,
+                          elem_id="history-bulk-download")
     with gr.Row(elem_id="history-workspace", equal_height=False):
         with gr.Column(scale=2, min_width=350, elem_id="history-collection"):
             view = gr.HTML(_history_html(rows[:60], len(rows)), elem_id="history-view", container=False,
                            js_on_load=_HISTORY_PICK_JS)
+            gr.HTML(_LIBRARY_PLAYER, elem_id="history-player", container=False, apply_default_css=False,
+                    js_on_load=_LIBRARY_PLAYER_JS)
         with gr.Column(scale=1, min_width=280, visible=False,
                        elem_id="history-inspector", elem_classes=["studio-panel", "tool-card", "inspector-card"]) as inspector:
             selection_note = gr.HTML("", elem_id="history-selection-note", container=False)
             title = gr.Textbox(label="作品名称", value="", placeholder="输入新的作品名称", elem_id="history-title")
             with gr.Row(elem_id="history-basic-actions"):
                 rename = gr.Button("保存名称", size="sm", elem_id="history-rename")
-                trash = gr.Button("移入回收站", size="sm", elem_id="history-trash")
+                delete = gr.Button("删除作品", size="sm", elem_id="history-delete")
             with gr.Accordion("创建新混音版本", open=False, elem_id="history-remix-settings"):
                 gr.HTML('<p class="field-note">从已保存的分轨重新混音，原作品会保留。</p>', container=False)
                 remix_vocal = gr.Slider(-24, 12, value=0, step=0.5, label="人声音量（dB）")
@@ -1244,15 +1560,20 @@ def _history_tab(history_tab):
                                             filterable=False)
                 remix = gr.Button("生成新版本", variant="primary", elem_id="history-remix-button")
     selection_outputs = [inspector, selection_note, title, remix_vocal, remix_music, remix_clarity, remix_reverb, remix_backing]
-    refresh_outputs = [view, selected, restore_from, status, recovery, restore, filters, *selection_outputs]
+    refresh_outputs = [view, selected, status, filters, *selection_outputs,
+                       bulk_ids, bulk_panel, export, bulk_delete, archive]
     quiet = dict(queue=False, show_progress="hidden")
     for event in (search.input, order.input, refresh.click, history_tab.select):
-        event(_history_refresh, inputs=[search, order, selected, restore_from], outputs=refresh_outputs, **quiet)
+        event(_history_refresh, inputs=[search, order, selected, bulk_ids], outputs=refresh_outputs, **quiet)
     view.click(_history_pick, inputs=None, outputs=[selected, status, *selection_outputs], **quiet)
-    restore_from.input(lambda value: gr.update(interactive=bool(value)), inputs=[restore_from], outputs=[restore], **quiet)
+    bulk_ids.input(lambda ids: (*_batch_actions(ids), gr.update(visible=False, value=None)),
+                   inputs=[bulk_ids], outputs=[export, bulk_delete, archive], **quiet)
+    export.click(_history_export, inputs=[bulk_ids], outputs=[archive],
+                 queue=True, trigger_mode="once", show_progress="minimal", show_progress_on=[export])
+    for button, bulk in ((delete, False), (bulk_delete, True)):
+        button.click(_history_delete, js=_confirm_delete_js(bulk), inputs=[confirmed_ids, search, order, selected, bulk_ids],
+                     outputs=refresh_outputs, queue=True, trigger_mode="once", show_progress="hidden", api_name=False)
     rename.click(_history_rename, inputs=[selected, title, search, order], outputs=refresh_outputs, **quiet)
-    trash.click(_history_trash, inputs=[selected, search, order], outputs=refresh_outputs, **quiet)
-    restore.click(_history_restore, inputs=[restore_from, search, order], outputs=refresh_outputs, **quiet)
     remix.click(_history_remix, inputs=[selected, remix_vocal, remix_music, remix_clarity, remix_reverb,
                                         remix_backing, search, order], outputs=refresh_outputs,
                 queue=True, trigger_mode="once", show_progress="minimal", show_progress_on=[status])
@@ -1264,13 +1585,14 @@ def _history_tab(history_tab):
 
 def applio_plugin():
     with gr.Tabs(elem_id="main-tabs") as tabs:
-        with gr.Tab("创作工作台", id="cover") as cover_tab:
-            gr.HTML('<header class="page-hero"><h1>个人声音<span>翻唱工作台</span></h1></header>',
+        with gr.Tab("创作工作台", id="cover", elem_id="studio-cover") as cover_tab:
+            gr.HTML('<header class="page-hero"><h1 class="cover-title">用自己的声音  <span>唱喜欢的歌</span></h1></header>',
                     container=False, apply_default_css=False)
-            model = _cover_tab(cover_tab)
-        with gr.Tab("我的声音", id="voice"):
+            model, second = _cover_tab(cover_tab)
+        with gr.Tab("我的声音", id="voice", elem_id="studio-voice"):
             training = _voice_tab()
-        with gr.Tab("作品库", id="history") as history_tab:
+        with gr.Tab("作品库", id="history", elem_id="studio-history") as history_tab:
             _history_tab(history_tab)
-    training.then(_refresh_voices, outputs=[model], queue=False, show_progress="hidden")
+    training.then(_refresh_voices, outputs=[model], queue=False, show_progress="hidden").then(
+        _duet_second_voices, inputs=[second], outputs=[second], queue=False, show_progress="hidden", api_name=False)
     return tabs

@@ -38,9 +38,13 @@ Screenshots show an isolated UI demo with synthetic audio and a placeholder voic
 |---|---|
 | **我的声音 (My voice)** | Record the spoken and sung prompts, preview each take and save it. Training becomes available with at least five minutes of saved audio and the usage declaration checked. Microphone feedback identifies device and permission problems and offers a recheck. |
 | **创作工作台 (Cover workspace)** | Drop in a song, select your personal voice and click **开始翻唱**. Follow the job on the right, then play the mix or expand **分开听** to hear the stems. When idle, the monitor shows the latest cover with its waveform, duration, player and download. |
-| **作品库 (Library)** | Search by song title or source filename and change the sort order. Open **管理** to rename a cover, move it to the recoverable trash or make a new mix from saved stems. |
+| **作品库 (Library)** | Search by song title or source filename and change the sort order. Open **管理** to rename or delete a cover, or make a new mix from saved stems. |
 
 Expand **声音设置** for pitch range, harmonies and vocal clarity. **混音与精细调节** contains reverb, vocal and instrumental levels, lead-vocal refinement and voice retrieval strength. Each slider has an editable value and an individual reset.
+
+For a mixed duet, open **翻唱范围** to replace the male part, the female part, or both. Unselected parts are kept in the mix during overlapping lines. For both parts, choose the same personal voice or two different voices. The optional separator estimates two vocal stems locally. Audition the original and converted parts after processing, and swap the assignment if the two singers are reversed throughout. For unison lines or similar voices that bleed between estimates, supply your own two aligned, full-length WAV or FLAC stems. [Optional model setup](docs/MODELS.md)
+
+In the library, **批量管理** selects works individually or across the current search results. Export the selected mixes as a ZIP or delete them together. Confirming deletion permanently removes the selected works' mixes, stems and run records from disk. Works moved to `output/.trash/` by an older version are still in that directory.
 
 The converted voice follows the source melody. Quality still depends on separation, training coverage, harmony and singing style; the app does not guarantee perfect pronunciation or pitch.
 

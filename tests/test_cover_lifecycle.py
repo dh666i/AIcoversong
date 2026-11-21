@@ -61,6 +61,13 @@ class CoverLifecycleTests(unittest.TestCase):
         self.assertTrue(button["interactive"])
         self.assertEqual(refreshed["value"], "voice.pth")
 
+    def test_refresh_keeps_selected_voice_or_falls_back_when_removed(self):
+        voices = [("较新的音色", "new.pth"), ("当前音色", "current.pth")]
+        with patch.object(ui, "_voices", return_value=voices):
+            self.assertEqual(ui._refresh_voices("current.pth")["value"], "current.pth")
+            self.assertEqual(ui._refresh_voices("removed.pth")["value"], "new.pth")
+            self.assertEqual(ui._refresh_voices()["value"], "new.pth")
+
     def test_voice_warning_uses_accessible_semantic_html(self):
         with patch.object(ui, "_voices", return_value=[]):
             alert, _, button = ui._cover_input_change("song.wav", None, "")
@@ -134,6 +141,18 @@ class CoverLifecycleTests(unittest.TestCase):
         self.failure = False
         retry = self.start(token)[-2]
         self.assertEqual(self.wait(retry)[1]["progress"]["state"], "done")
+
+    def test_cancellation_keeps_last_measured_position_on_refresh(self):
+        task = ui._CoverTask("token", "测试曲目")
+        ui._publish_cover(task, {"progress": {"state": "running", "steps": ["分离", "转换"],
+                                             "step": 1, "overall": .62, "elapsed": 12.0}})
+        stopping = ui._cover_view((task.title, task.item, False, True))
+        self.assertTrue(stopping[0]["stopping"])
+        self.assertFalse(stopping[6]["interactive"])
+        ui._publish_cover(task, {"progress": {"state": "stopped", "message": "已停止"}}, finished=True)
+        stopped = ui._cover_view((task.title, task.item, True, True))
+        self.assertEqual((stopped[0]["step"], stopped[0]["overall"], stopped[0]["elapsed"]), (1, .62, 12.0))
+        self.assertFalse(stopped[6]["visible"])
 
     def test_stop_waits_for_worker_cleanup_before_enabling_start(self):
         self.gate = threading.Event()
@@ -292,7 +311,15 @@ class CoverLifecycleTests(unittest.TestCase):
                          ("auto", "original", .75, 1., 0., 0., True, .25))
         self.assertEqual(ui._default_cover_settings(False)[6], False)
 
-    def test_cover_requires_both_upload_and_available_voice(self):
+    def test_duet_requires_two_distinct_manual_stems_and_valid_second_voice(self):
+        voices = [("我的音色", "voice.pth")]
+        self.assertEqual(ui._duet_requirements("male", "stems", None, "m.wav", "f.wav", voices), ("", ""))
+        self.assertTrue(ui._duet_requirements("male", "stems", None, "m.wav", None, voices)[1])
+        self.assertTrue(ui._duet_requirements("female", "stems", None, "f.wav", "f.wav", voices)[1])
+        self.assertTrue(ui._duet_requirements("both", "stems", "missing.pth", "m.wav", "f.wav", voices)[1])
+        self.assertEqual(ui._duet_requirements("both", "stems", ui.SAME_VOICE, "m.wav", "f.wav", voices), ("", ""))
+
+    def test_default_cover_requires_upload_and_personal_voice(self):
         for song, model in [(None, "voice.pth"), ("song.wav", None), ("song.wav", "deleted.pth")]:
             with self.subTest(song=song, model=model):
                 _alert, reason, button = ui._cover_input_change(song, model, "")

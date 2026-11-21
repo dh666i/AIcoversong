@@ -12,7 +12,8 @@ reference, because the backing track was mixed around exactly that vocal:
                 reference (third-octave smoothed: brightness and body, not
                 formants)
 2. dynamics   - follow the level contour of the reference (restores weak word
-                onsets; bounded gain, never a free boost)
+                onsets; bounded gain), then match short, weak noise-like
+                consonants using only the converted vocal's presence band
 3. level      - same level as the original dry lead, so the vocal/backing
                 balance of the record is kept
 4. space      - a synthetic reverb of the *converted* voice, as wet as the
@@ -167,6 +168,74 @@ def match_dynamics(converted: np.ndarray, reference: np.ndarray, sr: int, *, str
     return (converted * np.power(10.0, curve / 20.0)).astype(np.float32), stats
 
 
+def _presence_frames(audio: np.ndarray, sr: int, hop: int, band: tuple[float, float]) -> np.ndarray:
+    """Wide and presence-band levels, and presence-band spectral flatness, in dB."""
+    from scipy.fft import rfft, rfftfreq
+
+    size = 2 ** round(np.log2(sr * 0.023))
+    window = np.hanning(size).astype(np.float32)
+    normalizer = 2 / (size * float(window @ window))
+    padded = np.pad(audio, (size // 2, size // 2))
+    frames = np.lib.stride_tricks.sliding_window_view(padded, size)[::hop]
+    freqs = rfftfreq(size, 1 / sr)
+    bins = slice(*np.searchsorted(freqs, band))
+    result = np.empty((3, len(frames)), dtype=np.float32)
+    for start in range(0, len(frames), 256):
+        block = frames[start:start + 256]
+        power = np.abs(rfft(block * window, axis=1)) ** 2
+        presence = power[:, bins]
+        db = result[:, start:start + len(block)]
+        db[0] = 10 * np.log10(np.maximum(power.sum(axis=1) * normalizer, 1e-14))
+        db[1] = 10 * np.log10(np.maximum(presence.sum(axis=1) * normalizer, 1e-14))
+        db[2] = (10 * np.log10(np.maximum(presence, 1e-14)).mean(axis=1)
+                 - 10 * np.log10(np.maximum(presence.mean(axis=1), 1e-14)))
+    return result
+
+
+def restore_consonant_presence(converted: np.ndarray, reference: np.ndarray, sr: int,
+                               strength: float) -> tuple[np.ndarray, dict]:
+    """Lift weak broadband consonants in the conversion without borrowing source audio."""
+    from scipy import signal
+    from scipy.ndimage import gaussian_filter1d, maximum_filter1d
+
+    band = (1800.0, min(7200.0, sr * .45))
+    stats = {"strength": strength, "band_hz": list(band), "affected_seconds": 0.0, "peak_gain_db": 0.0}
+    hop = max(1, round(sr * .01))
+    if strength <= 0 or len(converted) < 4 * hop or band[1] <= band[0] or not np.any(converted):
+        return converted, stats
+    level, presence, flatness = _presence_frames(converted, sr, hop, band)
+    ref_level, ref_presence, ref_flatness = _presence_frames(reference, sr, hop, band)
+    loud, ref_loud = np.percentile(level, 95), np.percentile(ref_level, 95)
+    # Calibrate against voiced frames, so a uniformly quieter take receives no boost.
+    voiced = (level > loud - 20) & (ref_level > ref_loud - 20) & (ref_flatness < -12)
+    if not voiced.any():
+        return converted, stats
+    offset = np.median((ref_level - level)[voiced])
+    deficit = np.clip(ref_presence - presence - offset - 1.5, 0, 5.0)
+    # Frication is noise-like, is relatively strong above 1.8 kHz and occurs
+    # near a syllable. Require evidence on both tracks; silence stays silent.
+    noise = np.clip((ref_flatness + 18) / 9, 0, 1) * np.clip((flatness + 20) / 9, 0, 1)
+    prominence = np.clip((ref_presence - ref_level + 21) / 12, 0, 1)
+    audible = (presence > max(-72, loud - 49)) & (ref_presence > max(-66, ref_loud - 40))
+    gain_db = strength * deficit * noise * prominence * audible * maximum_filter1d(voiced, size=39)
+    gain_db = gaussian_filter1d(gain_db, sigma=.8, mode="constant")
+    if gain_db.max() < .05:
+        return converted, stats
+
+    # A symmetric FIR isolates only the converted singer's presence band with
+    # no shift in time. Keep interpolation buffers bounded for full-length songs.
+    taps = signal.firwin(129, band, pass_zero=False, fs=sr).astype(np.float32)
+    detail = signal.oaconvolve(converted, taps, mode="same")
+    frame_samples = np.arange(len(gain_db)) * hop
+    gain = np.expm1(gain_db * (np.log(10) / 20))
+    for start in range(0, len(detail), 65536):
+        chunk = detail[start:start + 65536]
+        chunk *= np.interp(np.arange(start, start + len(chunk)), frame_samples, gain)
+    stats.update(affected_seconds=round(float(np.sum(gain_db >= .5) * hop / sr), 3),
+                 peak_gain_db=round(float(gain_db.max()), 2))
+    return converted + detail, stats
+
+
 # --------------------------------------------------------------------------
 # 4. space
 # --------------------------------------------------------------------------
@@ -243,6 +312,7 @@ def treat_vocal(converted: np.ndarray, reference_dry: np.ndarray, sr: int = MIX_
     else:
         report["tone"] = {"strength": 0.0}
     lead, report["dynamics"] = match_dynamics(lead, reference, sr, strength=dynamics)
+    lead, report["consonants"] = restore_consonant_presence(lead, reference, sr, clarity)
     ref_db = envelope_db(reference, sr)
     target, current = active_rms(reference, ref_db, sr), active_rms(lead, ref_db, sr)
     # More than +12 dB would mean the model produced almost nothing: do not turn that into noise.
