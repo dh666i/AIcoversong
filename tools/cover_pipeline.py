@@ -195,6 +195,7 @@ def _tail(path: Path, length: int = 2600) -> str:
 _BAR = re.compile(rb"(\d+)/(\d+) \[")
 _CHUNKS = re.compile(r"(主唱|和声)：已转换 (\d+)/(\d+) 段".encode("utf-8"))
 _DUET_CHUNKS = re.compile(rb"duet-pass (\d+)/(\d+) chunks (\d+)/(\d+)")
+_DUET_SEPARATE_PASS = re.compile(rb"duet-separate-pass (\d+)/(\d+)")
 _HALF = "第 2/2 步".encode("utf-8")
 _TWO_PASSES = "本步共 2 遍转换".encode("utf-8")   # printed by the convert worker before its first pass
 _LEAD, _BACKING = "主唱".encode("utf-8"), "和声".encode("utf-8")
@@ -207,6 +208,8 @@ def stage_fraction(stage: str, log_path: Path) -> float:
     with log_path.open("rb") as stream:
         if stage == "convert":   # a few hundred bytes: read it all
             data = stream.read(400_000)
+        elif stage == "duet":
+            data = stream.read()
         else:
             size = log_path.stat().st_size
             stream.seek(max(0, size - 6000))
@@ -221,7 +224,13 @@ def stage_fraction(stage: str, log_path: Path) -> float:
         done, total = int(found[-1][0]), int(found[-1][1])
         return min(1.0, done / total) if total else 0.0
 
-    if stage in ("separate", "duet"):
+    if stage == "duet":
+        marker = _DUET_SEPARATE_PASS.search(data, max(0, data.rfind(b"duet-separate-pass ")))
+        if marker:
+            current, total = map(int, marker.groups())
+            return (current - 1 + last(data[marker.end():])) / total if total else 0.0
+        return last(data)   # older jobs
+    if stage == "separate":
         return last(tail)
     if stage == "refine":  # two models in a row, each about half of the stage
         if _HALF not in head and _HALF not in tail:
@@ -572,17 +581,22 @@ def _stage_result(run: Path, stage: str) -> dict:
 
 def _duet(job: dict, run: Path) -> dict:
     from duet_mix import prepare_uploaded, selected_roles, write_preserved
+    from duet_separator import SEPARATION_PASSES, split_duet
 
     separated = _read_json(run / "separate_result.json")
+    dry_roles = selected_roles(job["duet_mode"]) if job.get("duet_dereverb") else ()
+    completed = 0
     if job.get("duet_sources"):
         stems = prepare_uploaded(job["duet_sources"], separated["vocals"], run, separated.get("stem_gain_db", 0))
     else:
-        from duet_separator import split_duet
-        stems = split_duet(separated["vocals"], run, swap=job.get("duet_swap", False))
+        stems = split_duet(separated["vocals"], run, swap=job.get("duet_swap", False),
+                           extra_passes=len(dry_roles))
+        completed = SEPARATION_PASSES
     stems["duet_preserved"] = write_preserved(stems, job["duet_mode"], run)
-    if job.get("duet_dereverb"):
+    if dry_roles:
         # Strip the room from the input to RVC, retaining aligned originals for mix and audition.
-        for role in selected_roles(job["duet_mode"]):
+        for pass_number, role in enumerate(dry_roles, completed + 1):
+            print(f"duet-separate-pass {pass_number}/{completed + len(dry_roles)}", flush=True)
             dry_key = f"duet_{role}_dry"
             wet_key = f"duet_{role}_room"
             parts, _ = _two_stems(Path(stems[f"duet_{role}"]), DEREVERB_MODEL,
@@ -592,7 +606,7 @@ def _duet(job: dict, run: Path) -> dict:
             Path(parts[wet_key]).unlink()
     if not job.get("duet_sources"):
         balance_note = stems.get("duet_balance_note", "")
-        stems["duet_note"] = (balance_note + "已按估计的声部拆分对唱。两人的音区接近、同音合唱或有多人和声时可能串声；"
+        stems["duet_note"] = (balance_note + "已分别复核主唱与和声中的男女声部。两人的音区接近、同音合唱或有多人和声时可能串声；"
                                "可在“分开听”核对。角色反了可交换，局部分错可改用原始人声分轨。")
     return stems
 
@@ -752,12 +766,13 @@ def _mix(job: dict, run: Path) -> dict:
     refined = _stage_result(run, "refine")
     converted = _read_json(run / "convert_result.json")
     if job.get("duet_mode", "off") != "off":
-        from duet_mix import mix_duet
+        from duet_mix import automatically_separated, mix_duet
 
         stems = _read_json(run / "duet_result.json")
         report = mix_duet({**separated, **stems, **converted}, job["duet_mode"], run,
                           vocal_gain_db=job["vocal_gain"], music_gain_db=job["instrumental_gain"],
-                          clarity=job["clarity"], dynamics=0.6, reverb=job["reverb"])
+                          clarity=job["clarity"], dynamics=0.6, reverb=job["reverb"],
+                          auto_separated=automatically_separated(job, stems.get("duet_separator")))
         _write_json(run / "mix_report.json", report)
         return {"mix": _output_audio(run / "cover.wav", run), "converted": _output_audio(run / "my_vocals.wav", run)}
     backing_mode = job.get("backing", "original")

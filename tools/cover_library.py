@@ -301,7 +301,10 @@ def remix_work(work: str | Path | dict[str, Any], *, output_root: str | Path | N
             sources = {key: _safe_file(parent, filename, required=True)
                        for key, filename in duet_mix.remix_inputs(duet_mode).items()}
             files = duet_mix.retain_stems(sources, output)
+            source_info = _safe_file(parent, "duet_result.json") or _safe_file(parent, "result.json")
+            separator = _read_json(source_info).get("duet_separator") if source_info else None
             report = duet_mix.mix_duet(files, duet_mode, output,
+                                       auto_separated=duet_mix.automatically_separated(job, separator),
                                        **{key: value for key, value in params.items() if key != "backing_gain_db"})
         else:
             if __package__:
@@ -333,6 +336,8 @@ def remix_work(work: str | Path | dict[str, Any], *, output_root: str | Path | N
                   "converted": str(output / "my_vocals.wav"), "parent_run": parent.name}
         if duet_mode != "off":
             result.update(files, duet_mode=duet_mode)
+            if separator is not None:
+                result["duet_separator"] = separator
         _write_json(output / "result.json", result)
         custom = dict(parent_meta.get("metadata") or {})
         custom.update({"title": parent_meta["title"], "parent_run": parent.name, "created_at": _now(),

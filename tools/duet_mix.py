@@ -9,6 +9,11 @@ import shutil
 import numpy as np
 import soundfile as sf
 
+if __package__:
+    from .vocal_mix import MIX_SR, add_space, fit_length, limit, mono, read_audio, stereo, treat_vocal
+else:
+    from vocal_mix import MIX_SR, add_space, fit_length, limit, mono, read_audio, stereo, treat_vocal
+
 ROLES = ("male", "female")
 ROLE_NAMES = {"male": "男声", "female": "女声"}
 
@@ -21,10 +26,19 @@ def selected_roles(mode: str) -> tuple[str, ...]:
     raise ValueError("请选择要翻唱的对唱声部。")
 
 
+def automatically_separated(job: dict, separator) -> bool:
+    if job.get("duet_sources"):
+        return False
+    if isinstance(separator, dict):
+        separator = separator.get("method")
+    if separator:
+        return separator in ("auto", "automatic", "BS RoFormer Male/Female (aufr33)")
+    # The original job schema writes an empty map only for automatic duets.
+    return job.get("duet_sources") == {}
+
+
 def prepare_uploaded(stems: dict, vocals: str, run: Path, gain_db: float) -> dict:
     """Use source stems as authoritative voices; the separated instrumental is the bed."""
-    from vocal_mix import fit_length, read_audio, stereo
-
     reference = sf.info(vocals)
     gain = 10 ** (gain_db / 20)
     result = {}
@@ -144,6 +158,63 @@ def _shared_voice_gain(selected: np.ndarray, kept: np.ndarray, sr: int) -> np.nd
     return np.interp(np.arange(len(selected)), centers, envelope)
 
 
+def _attenuate_partner_leakage(voice: np.ndarray, reference: np.ndarray, partner: np.ndarray, sr: int) -> dict:
+    """Limit excess RVC level when a weak input duplicates the dominant singer."""
+    from scipy import signal
+    from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
+
+    hop = max(1, round(.02 * sr))
+    count = (len(voice) + hop - 1) // hop
+    # 100 ms of both waveforms: a shared note is insufficient evidence. Also
+    # require the two stems' upper harmonics to agree at the same phase.
+    sos = signal.butter(2, [700, min(4500, sr * .45)], btype="bandpass", fs=sr, output="sos").astype(np.float32)
+    state = np.zeros((len(sos), 2, 4), dtype=np.float32)
+    moments = np.empty((7, count), dtype=np.float64)
+    for start in range(0, count, 128):
+        stop = min(count, start + 128)
+        part = slice(start * hop, stop * hop)
+        pair = np.column_stack((stereo(reference[part]), stereo(partner[part])))
+        upper, state = signal.sosfilt(sos, pair, axis=0, zi=state)
+        output = voice[part]
+        padding = (stop - start) * hop - len(output)
+        if padding:
+            pair, upper, output = (np.pad(x, ((0, padding), (0, 0))) for x in (pair, upper, output))
+
+        def average(x):
+            return x.reshape(stop - start, -1).mean(axis=1, dtype=np.float64)
+
+        for i, data in ((0, pair), (3, upper)):
+            x, y = data[:, :2], data[:, 2:]
+            moments[i:i + 3, start:stop] = (average(x * x), average(y * y), average(x * y))
+        moments[6, start:stop] = average(output * output)
+    xx, yy, xy, hh, kk, hk, vv = uniform_filter1d(moments, 5, axis=1, mode="nearest")
+    ref_db, partner_db, out_db = 10 * np.log10(np.maximum([xx, yy, vv], 1e-14))
+    usual = float(np.percentile(ref_db, 98))
+    offset = np.clip(np.median((out_db - ref_db)[ref_db >= usual - 12]), -3, 3)
+    corr = xy / np.sqrt(np.maximum(xx * yy, 1e-25))
+    upper_corr = hk / np.sqrt(np.maximum(hh * kk, 1e-25))
+    confidence = np.clip(np.minimum((corr - .42) / .22, (upper_corr - .38) / .22), 0, 1)
+    # Nearly unison singers pass through short intervals of matching phase.
+    # Check half a second too: copied overtones stay aligned as pitch moves.
+    slow_x, slow_y, slow_xy, slow_h, slow_k, slow_hk = uniform_filter1d(
+        moments[:6], 25, axis=1, mode="constant")
+    slow_corr = slow_xy / np.sqrt(np.maximum(slow_x * slow_y, 1e-25))
+    slow_upper = slow_hk / np.sqrt(np.maximum(slow_h * slow_k, 1e-25))
+    confidence *= np.clip(np.minimum((slow_corr - .38) / .20, (slow_upper - .35) / .20), 0, 1)
+    confidence *= (hh > .001 * xx) & (kk > .001 * yy)
+    dominance = np.clip((partner_db - ref_db - 9) / 6, 0, 1)
+    quiet = np.clip((usual - 12 - ref_db) / 7, 0, 1)
+    excess = np.clip(out_db - ref_db - offset - 2, 0, 15)
+    reduction = gaussian_filter1d(median_filter(excess * confidence * dominance * quiet, 3), .8)
+    centers = (np.arange(count) + .5) * hop
+    gain = 10 ** (-reduction / 20)
+    for start in range(0, len(voice), 65536):
+        stop = min(start + 65536, len(voice))
+        voice[start:stop] *= np.interp(np.arange(start, stop), centers, gain)[:, None]
+    return {"attenuated_seconds": round(float((reduction >= 3).sum() * hop / sr), 2),
+            "peak_reduction_db": round(float(reduction.max()), 2)}
+
+
 def repair_solo_bleed(selected_path, preserved_path, output_dir, *, solo_spans) -> dict:
     """Reassign only coherent leakage inside explicitly known solo spans (seconds).
 
@@ -203,9 +274,7 @@ def repair_solo_bleed(selected_path, preserved_path, output_dir, *, solo_spans) 
 
 
 def mix_duet(files: dict, mode: str, output: Path, *, vocal_gain_db: float, music_gain_db: float,
-             clarity: float, dynamics: float, reverb: float) -> dict:
-    from vocal_mix import MIX_SR, add_space, fit_length, limit, mono, read_audio, stereo, treat_vocal
-
+             clarity: float, dynamics: float, reverb: float, auto_separated: bool = False) -> dict:
     music = stereo(read_audio(files["instrumental"]))
     length = len(music)
     voices = np.zeros((length, 2), dtype=np.float32)
@@ -219,6 +288,15 @@ def mix_duet(files: dict, mode: str, output: Path, *, vocal_gain_db: float, musi
             send = -25 + 20 * math.log10(reverb)
             voice += add_space(mono(voice), MIX_SR, wet_ratio_db=send, rt60=0.5)
             report["space"] = {"send_db": send, "rt60": 0.5}
+        # Older single-role remixes retain the complete original partner and
+        # residual together. In both-role mode compare the two input singers.
+        if auto_separated:
+            partner_key = "duet_preserved"
+            if mode == "both":
+                partner_key = "duet_female" if role == "male" else "duet_male"
+            partner = fit_length(read_audio(files[partner_key]), length)
+            report["partner_leakage"] = _attenuate_partner_leakage(voice, ref, partner, MIX_SR)
+            del partner
         voices += voice
         reports[role] = report
         del ref, converted, voice

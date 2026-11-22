@@ -8,10 +8,53 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from duet_mix import _attenuate_quiet_leakage, repair_solo_bleed
+from duet_mix import _attenuate_partner_leakage, _attenuate_quiet_leakage, repair_solo_bleed
 
 
 class QuietLeakageTests(unittest.TestCase):
+    def test_independent_near_unison_does_not_trigger_on_passing_phase_alignment(self):
+        sr = 16000
+        time = np.arange(5 * sr) / sr
+        def singer(pitch):
+            phase = 2 * np.pi * pitch * time + .06 * np.sin(2 * np.pi * 4 * time)
+            return np.sin(phase) + .35 * np.sin(4 * phase) + .2 * np.sin(7 * phase)
+        soft = (time > 1) & (time < 4)
+        first = singer(220.)
+        reference = (first * np.where(soft, .008, .20))[:, None].astype(np.float32)
+        partner = (singer(220.8) * .23)[:, None].astype(np.float32)
+        voice = np.repeat((first * np.where(soft, .06, .20))[:, None], 2, axis=1).astype(np.float32)
+        before = voice.copy()
+        _attenuate_partner_leakage(voice, reference, partner, sr)
+        np.testing.assert_array_equal(voice, before)
+
+    def test_quiet_copy_of_dominant_singer_is_limited_but_independent_unison_survives(self):
+        sr = 8000
+        time = np.arange(4 * sr + 17) / sr
+        fundamental = np.sin(2*np.pi*220*time)
+        shared = fundamental + .5*np.sin(2*np.pi*1100*time)
+        independent = fundamental + .5*np.sin(2*np.pi*1540*time)
+        reference = np.where(time < 1, .2, .009) * shared
+        partner = np.where(time < 2, .18 * shared, .18 * independent)
+        voice = np.where((time >= 1) & (time < 3), .06, np.where(time < 1, .2, .009)) * shared
+        stereo = lambda a: np.column_stack((a, -a)).astype(np.float32)
+        reference, partner, voice = map(stereo, (reference, partner, voice))
+        before = voice.copy()
+        result = _attenuate_partner_leakage(voice, reference, partner, sr)
+        leaked = (time > 1.15) & (time < 1.85)
+        self.assertLess(np.linalg.norm(voice[leaked]), .27 * np.linalg.norm(before[leaked]))
+        untouched = (time < .85) | (time > 2.15)
+        np.testing.assert_array_equal(voice[untouched], before[untouched])
+        self.assertGreater(result["attenuated_seconds"], .8)
+
+        # Both-role conversion uses the other original input as evidence;
+        # neither a genuine main voice nor a correctly soft copy is lowered.
+        strong_voice = partner.copy()
+        _attenuate_partner_leakage(strong_voice, partner, reference, sr)
+        np.testing.assert_array_equal(strong_voice, partner)
+        quiet_voice = reference.copy()
+        _attenuate_partner_leakage(quiet_voice, reference, partner, sr)
+        np.testing.assert_array_equal(quiet_voice, reference)
+
     def test_reduces_only_excess_in_quiet_intervals(self):
         sr = 8000
         t = np.arange(sr * 2 + 17) / sr

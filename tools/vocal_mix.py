@@ -26,6 +26,11 @@ from pathlib import Path
 
 import numpy as np
 
+if __package__:
+    from .vocal_buzz import reduce_periodic_buzz
+else:
+    from vocal_buzz import reduce_periodic_buzz
+
 MIX_SR = 44100
 
 
@@ -319,6 +324,7 @@ def treat_vocal(converted: np.ndarray, reference_dry: np.ndarray, sr: int = MIX_
     gain = float(np.clip(target / current, 10 ** (-24 / 20), 10 ** (12 / 20))) if current > 0 else 1.0
     lead = lead * gain
     report["level_gain_db"] = float(20 * np.log10(max(gain, 1e-9)))
+    lead, report["periodic_buzz"] = reduce_periodic_buzz(lead, reference, sr)
     out = stereo(lead).copy()
     if reference_wet is not None and reverb > 0:
         wet = mono(fit_length(reference_wet, len(reference)))

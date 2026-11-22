@@ -14,6 +14,7 @@ import soundfile as sf
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import duet_separator
+from cover_pipeline import LEAD_CONFIG, LEAD_MODEL, _duet, _write_json, stage_fraction
 
 
 class DuetSeparatorTests(unittest.TestCase):
@@ -42,19 +43,46 @@ class DuetSeparatorTests(unittest.TestCase):
         source = self.root / "vocals.wav"
         sf.write(source, mixture, rate, subtype="FLOAT")
 
+        (self.root / LEAD_MODEL).touch()
+        (self.root / LEAD_CONFIG).touch()
+        calls = []
+
         def estimate(src, model, mapping, scratch, stage, **kwargs):
-            self.assertEqual((src, model), (source, duet_separator.MODEL))
+            calls.append((src.name, model))
             result = {}
-            for name, sample in (("male", first), ("female", second)):
+            if model == LEAD_MODEL:
+                samples = (("Vocals", first), ("Instrumental", second))
+            elif src == source:
+                samples = (("male", first + second), ("female", second * 0))
+            else:
+                samples = (("male", first if src.stem == "lead" else first * 0),
+                           ("female", second if src.stem == "backing" else second * 0))
+            for name, sample in samples:
                 target = scratch / (mapping[name] + ".wav")
                 sf.write(target, np.column_stack((sample, sample)), rate, subtype="FLOAT")
                 result[mapping[name]] = str(target)
             return result, 1
 
+        # The reconciliation algorithm has its own signal tests. Supply corrected
+        # outputs here to exercise the full worker wiring, including late swap.
+        def reconcile(male, female, lead, backing, out_male, out_female):
+            self.assertEqual((male.stem, female.stem), ("whole-male", "whole-female"))
+            self.assertEqual([lead[r].stem for r in ("male", "female")], ["lead-male", "lead-female"])
+            self.assertEqual([backing[r].stem for r in ("male", "female")], ["backing-male", "backing-female"])
+            for path, target in ((lead["male"], out_male), (backing["female"], out_female)):
+                path.replace(target)
+            return {"checked": True}
+
         with patch.object(duet_separator, "duet_available", return_value=True), \
-                patch("cover_pipeline._two_stems", side_effect=estimate):
+                patch.object(duet_separator, "MODEL_DIR", self.root), \
+                patch("cover_pipeline._two_stems", side_effect=estimate), \
+                patch("duet_harmony.reconcile_harmony", side_effect=reconcile):
             for swap in (False, True):
+                calls.clear()
                 paths = duet_separator.split_duet(source, self.root, swap=swap)
+                self.assertEqual(calls, [("vocals.wav", duet_separator.MODEL), ("vocals.wav", LEAD_MODEL),
+                                         ("lead.wav", duet_separator.MODEL), ("backing.wav", duet_separator.MODEL)])
+                self.assertEqual(paths["duet_harmony_review"], {"checked": True})
                 data = []
                 for name in ("male", "female", "residual"):
                     stem, sr = sf.read(paths["duet_" + name], dtype="float32")
@@ -64,6 +92,39 @@ class DuetSeparatorTests(unittest.TestCase):
                 np.testing.assert_array_equal(data[1], first if swap else second)
                 np.testing.assert_allclose(data[2], remainder, atol=1e-7)
                 np.testing.assert_allclose(sum(data), mixture, atol=1e-7)
+
+    def test_missing_harmony_model_reports_base_installer(self):
+        with patch.object(duet_separator, "duet_available", return_value=True), \
+                patch.object(duet_separator, "MODEL_DIR", self.root):
+            with self.assertRaisesRegex(FileNotFoundError, "主唱与和声"):
+                duet_separator.split_duet(self.root / "vocals.wav", self.root)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_progress_across_harmony_review_and_optional_dereverb(self):
+        log = self.root / "duet.log"
+        contents = b""
+        for i in range(1, 7):
+            contents += f"duet-separate-pass {i}/6\n".encode()
+            log.write_bytes(contents)
+            self.assertAlmostEqual(stage_fraction("duet", log), (i - 1) / 6)
+            contents += b"0123456789" * 2000 + b" 5/10 [0:01]\n"
+            log.write_bytes(contents)
+            self.assertAlmostEqual(stage_fraction("duet", log), (i - .5) / 6)
+            contents += b"10/10 [0:02]\n"
+
+    def test_worker_uses_uploaded_roles_directly(self):
+        sample = (.2 * np.sin(np.arange(16000) * .013)).astype(np.float32)
+        stems = {}
+        for role, scale in (("male", .5), ("female", 1.0)):
+            path = self.root / (role + ".wav")
+            sf.write(path, sample * scale, 44100, subtype="FLOAT")
+            stems[role] = str(path)
+        _write_json(self.root / "separate_result.json", {"vocals": stems["male"]})
+        with patch("duet_separator.split_duet", side_effect=AssertionError("unexpected model call")):
+            result = _duet({"duet_mode": "male", "duet_sources": stems, "duet_swap": True}, self.root)
+        self.assertEqual(result["duet_separator"]["method"], "uploaded")
+        retained, _ = sf.read(result["duet_preserved"], dtype="float32")
+        np.testing.assert_array_equal(retained[:, 0], sample)
 
     @unittest.skipUnless(find_spec("scipy"), "sample-rate conversion uses separator-env")
     def test_resampled_estimates_follow_original_stereo_grid(self):

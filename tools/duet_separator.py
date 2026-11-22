@@ -10,6 +10,7 @@ MODEL_DIR = Path(__file__).resolve().parents[1] / "Applio" / "rvc" / "models" / 
 MODEL = "bs_roformer_male_female_by_aufr33_sdr_7.2889.ckpt"
 CONFIG = "config_chorus_male_female_bs_roformer.yaml"
 BLOCK_FRAMES = 65536
+SEPARATION_PASSES = 4
 
 
 def duet_available() -> bool:
@@ -87,15 +88,25 @@ def _write_outputs(source: Path, male: Path, female: Path, scratch: Path, run: P
     return paths
 
 
-def split_duet(vocals_path: str | Path, run_dir: str | Path, *, swap: bool = False) -> dict:
-    """Run inside separator-env on the complete vocals, before any karaoke split."""
+def split_duet(vocals_path: str | Path, run_dir: str | Path, *, swap: bool = False,
+               extra_passes: int = 0) -> dict:
+    """Estimate both roles, then check the lead and backing layers independently."""
     if not duet_available():
         raise FileNotFoundError("缺少男女人声分离模型。请在项目根目录运行 "
                                 r".\env\Scripts\python.exe tools/download_assets.py --duet，"
                                 "或提供两条已对齐的人声分轨。")
 
     import soundfile as sf
-    from cover_pipeline import _two_stems
+    if __package__:
+        from .cover_pipeline import LEAD_CONFIG, LEAD_MODEL, _two_stems
+        from .duet_harmony import reconcile_harmony
+    else:
+        from cover_pipeline import LEAD_CONFIG, LEAD_MODEL, _two_stems
+        from duet_harmony import reconcile_harmony
+
+    if not all((MODEL_DIR / name).is_file() for name in (LEAD_MODEL, LEAD_CONFIG)):
+        raise FileNotFoundError("合唱复核需要基础模型中的主唱与和声分离模型，"
+                                "请运行 tools/download_assets.py 安装基础模型，或上传已对齐的男女声分轨。")
 
     source, run = Path(vocals_path).resolve(), Path(run_dir).resolve()
     info = sf.info(source)
@@ -103,10 +114,24 @@ def split_duet(vocals_path: str | Path, run_dir: str | Path, *, swap: bool = Fal
         raise ValueError("对唱分离需要非空的单声道或立体声人声。")
     with TemporaryDirectory(prefix="duet-work-", dir=run) as working:
         scratch = Path(working)
-        estimates, _ = _two_stems(source, MODEL, {"male": "male-estimate", "female": "female-estimate"},
-                                  scratch, "duet", overlap=4, autocast=False)
-        male, female = Path(estimates["male-estimate"]), Path(estimates["female-estimate"])
+        total = SEPARATION_PASSES + extra_passes
+
+        def role_estimates(audio: Path, layer: str, pass_number: int) -> dict:
+            print(f"duet-separate-pass {pass_number}/{total}", flush=True)
+            names = {role: f"{layer}-{role}" for role in ("male", "female")}
+            paths, _ = _two_stems(audio, MODEL, names, scratch, layer, overlap=4, autocast=False)
+            return {role: Path(paths[name]) for role, name in names.items()}
+
+        baseline = role_estimates(source, "whole", 1)
+        print(f"duet-separate-pass 2/{total}", flush=True)
+        layers, _ = _two_stems(source, LEAD_MODEL, {"Vocals": "lead", "Instrumental": "backing"},
+                               scratch, "layers", overlap=4, autocast=True)
+        lead = role_estimates(Path(layers["lead"]), "lead", 3)
+        backing = role_estimates(Path(layers["backing"]), "backing", 4)
+        male, female = scratch / "routed-male.wav", scratch / "routed-female.wav"
+        report = reconcile_harmony(baseline["male"], baseline["female"], lead, backing, male, female)
         if swap:
             male, female = female, male
         result = _write_outputs(source, male, female, scratch, run)
-    return {**result, "duet_separator": "BS RoFormer Male/Female (aufr33)", "duet_swapped": bool(swap)}
+    return {**result, "duet_separator": "BS RoFormer Male/Female (aufr33)", "duet_swapped": bool(swap),
+            "duet_harmony_review": report}

@@ -123,6 +123,31 @@ class DuetTests(unittest.TestCase):
             np.testing.assert_allclose(audio - converted_only, self.voices["female"] + self.residual, atol=3e-7)
             self.assertLess(np.max(np.abs(converted_only[int(1.7*self.sr):])), 1e-6)
 
+    def test_partner_leakage_requires_automatic_stems_in_fresh_and_repeated_remixes(self):
+        stems = self.stems.copy()
+        stems["duet_preserved"] = duet_mix.write_preserved(stems, "male", self.run)
+        converted = self.run / "duet_male_converted.wav"
+        sf.write(converted, self.voices["male"], self.sr, subtype="FLOAT")
+        (self.run / "convert_result.json").write_text(json.dumps({"duet_male_converted": str(converted)}))
+        (self.run / "separate_result.json").write_text(json.dumps({"instrumental": str(self.music)}))
+        job = dict(duet_mode="male", vocal_gain=0, instrumental_gain=0, clarity=0, reverb=0)
+        cases = [
+            ({"duet_sources": {}}, {}, True),
+            ({}, {"duet_separator": "BS RoFormer Male/Female (aufr33)"}, True),
+            ({"duet_sources": {"male": "user.wav"}}, {}, False),
+            ({}, {"duet_separator": {"method": "uploaded"}}, False),
+            ({}, {}, False),
+        ]
+        for options, metadata, automatic in cases:
+            with self.subTest(options=options, metadata=metadata):
+                (self.run / "job.json").write_text(json.dumps({**job, **options}))
+                (self.run / "duet_result.json").write_text(json.dumps({**stems, **metadata}))
+                with patch.object(duet_mix, "_attenuate_partner_leakage", return_value={}) as suppress:
+                    pipeline._mix({**job, **options}, self.run)
+                    first = cover_library.remix_work(self.run.name, output_root=self.root)
+                    cover_library.remix_work(first["run_id"], output_root=self.root)
+                self.assertEqual(suppress.call_count, 3 if automatic else 0)
+
     def test_invalid_mode_and_half_uploaded_pair_rejected_before_creating_a_run(self):
         song = self.stems["duet_male"]
         model = self.root / "voice.pth"
