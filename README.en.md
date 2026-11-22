@@ -6,11 +6,11 @@
 
 Local recording · Voice training · AI song covers
 
-[Download the latest source](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip) · [Installation and updates](docs/INSTALL.md) · [Changelog](CHANGELOG.md) · [简体中文](README.md)
+[Download source ZIP](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip) · [Release notes and checksum](https://github.com/dh666i/AIcoversong/releases/latest) · [Installation and updates](docs/INSTALL.md#installation-and-updates-in-english) · [简体中文](README.md)
 
 </div>
 
-AIcoversong brings microphone recording, voice training, vocal separation, voice conversion and mixing into one Chinese-language web interface. Audio processing runs locally; your recordings and songs do not need a third-party inference service.
+AIcoversong is a local song-cover studio for Windows PCs with NVIDIA GPUs. Train a voice from your own recordings or import an existing RVC voice model, then choose a song to cover. For duets, keep one original singer or choose a different voice for each part. The desktop web interface is in Chinese, and all audio processing runs on your PC.
 
 It builds on [Applio](https://github.com/IAHispano/Applio), RVC and [audio-separator](https://github.com/nomadkaraoke/python-audio-separator), with upstream attribution and licenses retained.
 
@@ -46,7 +46,7 @@ For a mixed duet, open **翻唱范围** to replace the male part, the female par
 
 In the library, **批量管理** selects works individually or across the current search results. Export the selected mixes as a ZIP or delete them together. Confirming deletion permanently removes the selected works' mixes, stems and run records from disk. Works moved to `output/.trash/` by an older version are still in that directory.
 
-The converted voice follows the source melody. Quality still depends on separation, training coverage, harmony and singing style; the app does not guarantee perfect pronunciation or pitch.
+During mixing, the studio detects and softens short buzzes that voice conversion can introduce on consonants. Pitch, pronunciation and timbre still depend on the vocal separation, the original performance and the pitch range covered by the training recordings.
 
 ## Quick start
 
@@ -62,9 +62,9 @@ The documented setup targets **Windows 10/11 x64 with an NVIDIA GPU**. The refer
 
 4. Run `启动翻唱.bat` (or `tools/start.ps1`). The studio opens at `http://127.0.0.1:6969`. Start under **我的声音** to train your voice, or go directly to **创作工作台** if you already have a personal voice model.
 
-Initial setup downloads roughly **3.02GB** of model/tool assets, plus Python and several GB of dependencies. Reserve at least **20GB** initially; training and saved covers use more. No personal voice model, recordings, songs or credentials are distributed with the source.
+Initial setup downloads about **3.02 GB** of models and tools, plus Python and several GB of dependencies. Reserve at least **20 GB** initially, with additional space for training and saved covers. Automatic duet separation adds an optional **527 MB** download. You can skip it when supplying your own male and female stems. [Optional model setup](docs/MODELS.md)
 
-To update an existing installation, let any training or cover finish, stop the server with `关闭翻唱.bat`, update the source and run `启动翻唱.bat` again. The [installation guide](docs/INSTALL.md) covers both Git and ZIP installations.
+Existing voice models work after upgrading. To apply the buzz reduction to an older work, create a new mix from its saved stems in the library. To recover a harmony missed by automatic separation, make a new cover from the original song. [Upgrade instructions](docs/INSTALL.md#installation-and-updates-in-english) · [Changelog](CHANGELOG.md)
 
 ## Development
 

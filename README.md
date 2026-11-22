@@ -6,7 +6,7 @@
 
 本地录音 · 音色训练 · AI 翻唱
 
-[下载最新版源码](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip) · [安装与更新](docs/INSTALL.md) · [更新日志](CHANGELOG.md) · [English](README.en.md)
+[下载源码 ZIP](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip) · [发行说明与校验文件](https://github.com/dh666i/AIcoversong/releases/latest) · [安装与更新](docs/INSTALL.md) · [English](README.en.md)
 
 [![CI](https://github.com/dh666i/AIcoversong/actions/workflows/check.yml/badge.svg)](https://github.com/dh666i/AIcoversong/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE)
@@ -14,7 +14,7 @@
 
 </div>
 
-AIcoversong 是运行在 Windows 电脑上的中文翻唱工作台。可以用麦克风录下自己的声音并训练音色，再上传一首歌，在本机完成分离、转换、混音和试听。
+AIcoversong 是面向 Windows 和 NVIDIA 显卡的本地中文翻唱工作台。用自己的录音训练音色，或导入已有的 RVC 音色模型，选择歌曲即可在本机制作翻唱。对唱可以保留一方原声，也可以为两位歌手分别选择音色。
 
 项目基于 [Applio](https://github.com/IAHispano/Applio)、RVC 与 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator) 构建，保留上游许可与致谢。模型在本地运行，录音与歌曲无需上传到第三方推理服务。
 
@@ -57,7 +57,7 @@ AIcoversong 是运行在 Windows 电脑上的中文翻唱工作台。可以用�
 
 在「作品库」搜索要整理的歌曲，展开「批量管理」，逐首勾选或全选当前筛选结果，可打包下载所选成品 WAV，也可批量删除。确认删除后，所选作品的成品、分轨及本次制作记录会从磁盘移除。旧版本已移入 `output/.trash/` 的作品仍保存在该目录。
 
-翻唱会跟随输入歌曲的旋律。它不是“任何素材都不会跑调”的保证：分离质量、音色训练覆盖、原唱和声与唱法都会影响结果。
+工作台会检测并减弱换声后部分辅音中出现的短促蜂鸣。旋律、咬字和音色还会受原始分轨、原唱唱法及训练录音的音域覆盖影响。
 
 ## 开始使用
 
@@ -79,9 +79,9 @@ AIcoversong 是运行在 Windows 电脑上的中文翻唱工作台。可以用�
 
 4. 双击 `启动翻唱.bat`，浏览器打开 `http://127.0.0.1:6969`。首次使用可先到「我的声音」录音和训练，已有个人音色可直接打开「创作工作台」。
 
-首次安装需要联网下载依赖与约 **3.02GB** 基础模型/工具文件，另有数 GB 的 PyTorch 和 Python 依赖，建议至少预留 **20GB**，训练和作品会继续占用空间。仓库不包含作者的个人音色、录音、歌曲或付费服务凭据。
+首次安装需要联网下载约 **3.02 GB** 基础模型和工具，以及数 GB 的 Python 和 PyTorch 依赖。建议至少预留 **20 GB**，训练和作品会继续占用空间。自动男女分轨另需约 **527 MB**，使用自备男女分轨可跳过此项下载。[可选模型与安装命令](docs/MODELS.md)
 
-已有安装请在任务结束后关闭旧服务，更新源码，再双击 `启动翻唱.bat`。具体步骤及国内下载选项见[安装与更新指南](docs/INSTALL.md)。
+已有安装可保留个人音色继续使用。要给旧作品应用蜂鸣修复，可用作品库中的已保存分轨创建新混音；要找回自动分轨漏掉的合唱声部，需要从原曲重新翻唱。[升级步骤](docs/INSTALL.md#更新已有安装) · [版本记录](CHANGELOG.md)
 
 ## 项目结构
 

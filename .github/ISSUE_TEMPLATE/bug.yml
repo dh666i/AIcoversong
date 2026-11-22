@@ -13,9 +13,14 @@ body:
     id: environment
     attributes:
       label: 运行环境 / Environment
-      placeholder: Windows 版本、显卡/显存、驱动、Python/uv版本、仓库commit
+      placeholder: Windows 版本、显卡/显存、驱动、Python/uv 版本，以及 Release 版本号或 Git 提交号
     validations:
       required: true
+  - type: textarea
+    id: audio
+    attributes:
+      label: 音频问题（选填） / Audio issue (optional)
+      description: 给出出现问题的时间点、翻唱范围，以及使用自动分轨还是上传分轨。 / Include the timestamp, selected singer(s) and stem source.
   - type: textarea
     id: logs
     attributes:
