@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (2026-11-24)
+
+- Songs and aligned duet stems now accept the same 31 file extensions, including WavPack, APE, CAF, MKA and WebM. Containers with multiple audio streams use the first audio stream.
+- Download a finished mix or a saved stem as WAV, FLAC, MP3, M4A (AAC), OGG (Vorbis), Opus or AIFF. WAV downloads preserve the original file. Other formats are encoded locally.
+- Choose the audio format for mixes inside a batch ZIP. Older covers can be exported from their saved tracks without rerunning conversion. Open **管理 → 下载分轨** in the library to see which stems a work has.
+
+[Compare v0.3.0 and v0.4.0](https://github.com/dh666i/AIcoversong/compare/v0.3.0...v0.4.0)
+
 ## 0.3.0 (2026-11-22)
 
 ### Duet covers

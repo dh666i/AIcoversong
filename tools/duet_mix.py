@@ -5,13 +5,16 @@ import math
 import os
 from pathlib import Path
 import shutil
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import soundfile as sf
 
 if __package__:
+    from .audio_input import decode_audio
     from .vocal_mix import MIX_SR, add_space, fit_length, limit, mono, read_audio, stereo, treat_vocal
 else:
+    from audio_input import decode_audio
     from vocal_mix import MIX_SR, add_space, fit_length, limit, mono, read_audio, stereo, treat_vocal
 
 ROLES = ("male", "female")
@@ -42,18 +45,33 @@ def prepare_uploaded(stems: dict, vocals: str, run: Path, gain_db: float) -> dic
     reference = sf.info(vocals)
     gain = 10 ** (gain_db / 20)
     result = {}
-    for role in ROLES:
-        info = sf.info(stems[role])
-        if info.format not in {"WAV", "WAVEX", "RF64", "FLAC"} or info.channels not in (1, 2):
-            raise ValueError(f"请上传单声道或双声道的{ROLE_NAMES[role]} WAV/FLAC 分轨。")
-        if abs(info.duration - reference.duration) > 0.1:
-            raise ValueError(f"{ROLE_NAMES[role]}分轨与原曲时长不一致；请从同一起点导出整首歌，保留前后静音。")
-        audio = read_audio(stems[role], sr=reference.samplerate)
-        if not np.isfinite(audio).all() or not np.any(np.abs(audio) > 1e-5):
-            raise ValueError(f"{ROLE_NAMES[role]}分轨为空或包含无效采样，请检查上传文件。")
-        target = run / f"duet_{role}.wav"
-        sf.write(target, stereo(fit_length(audio, reference.frames)) * gain, reference.samplerate, subtype="FLOAT")
-        result[f"duet_{role}"] = str(target)
+    with TemporaryDirectory(dir=run, prefix="duet-input-") as scratch:
+        working = Path(scratch)
+        for role in ROLES:
+            source = Path(stems[role])
+            info = None
+            if source.suffix.lower() in {".wav", ".wave", ".flac"}:
+                try:
+                    info = sf.info(source)
+                except sf.LibsndfileError:
+                    pass  # Some WAV codecs require FFmpeg.
+            if info is None:
+                decoded = working / f"decoded_{role}.wav"
+                decode_audio(source, decoded)
+                source, info = decoded, sf.info(decoded)
+            if info.channels not in (1, 2):
+                raise ValueError(f"请上传单声道或双声道的{ROLE_NAMES[role]}分轨。")
+            if abs(info.duration - reference.duration) > 0.1:
+                raise ValueError(f"{ROLE_NAMES[role]}分轨与原曲时长不一致；请从同一起点导出整首歌，保留前后静音。")
+            audio = read_audio(source, sr=reference.samplerate)
+            if not np.isfinite(audio).all() or not np.any(np.abs(audio) > 1e-5):
+                raise ValueError(f"{ROLE_NAMES[role]}分轨为空或包含无效采样，请检查上传文件。")
+            filename = f"duet_{role}.wav"
+            sf.write(working / filename, stereo(fit_length(audio, reference.frames)) * gain,
+                     reference.samplerate, subtype="FLOAT")
+            result[f"duet_{role}"] = str(run / filename)
+        for target in result.values():
+            (working / Path(target).name).replace(target)
     result["duet_separator"] = {"method": "uploaded", "stem_gain_db": gain_db}
     return result
 

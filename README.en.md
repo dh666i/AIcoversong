@@ -42,9 +42,13 @@ Screenshots show an isolated UI demo with synthetic audio and a placeholder voic
 
 Expand **声音设置** for pitch range, harmonies and vocal clarity. **混音与精细调节** contains reverb, vocal and instrumental levels, lead-vocal refinement and voice retrieval strength. Each slider has an editable value and an individual reset.
 
-For a mixed duet, open **翻唱范围** to replace the male part, the female part, or both. For both parts, choose the same personal voice or two different voices. Automatic separation checks the lead and backing vocals independently and moves misassigned harmony back to its singer before voice conversion. This runs locally by default. Audition the original and converted parts after processing, and swap the assignment if the two singers are reversed throughout. For unison lines or similar voices that bleed between estimates, supply your own two aligned, full-length WAV or FLAC stems. [Optional model setup](docs/MODELS.md)
+Songs and duet stems accept 31 file extensions, including MP3, FLAC, WAV, WavPack (.wv), APE and CAF. For MP4, MKA and WebM containers, the studio reads the first audio track.
 
-In the library, **批量管理** selects works individually or across the current search results. Export the selected mixes as a ZIP or delete them together. Confirming deletion permanently removes the selected works' mixes, stems and run records from disk. Works moved to `output/.trash/` by an older version are still in that directory.
+Download finished mixes and saved stems as WAV, FLAC, MP3, M4A (AAC), OGG (Vorbis), Opus or AIFF. Choose WAV for the original file, FLAC for lossless storage, or MP3 or M4A for sharing. To export a stem from a previously saved cover, open **管理 → 下载分轨** in the library.
+
+For a mixed duet, open **翻唱范围** to replace the male part, the female part, or both. For both parts, choose the same personal voice or two different voices. Automatic separation checks the lead and backing vocals independently and moves misassigned harmony back to its singer before voice conversion. This runs locally by default. Audition the original and converted parts after processing, and swap the assignment if the two singers are reversed throughout. For unison lines or similar voices that bleed between estimates, supply two full-length stems aligned to the start of the song. WAV and FLAC are recommended for exports from a recording session. [Optional model setup](docs/MODELS.md)
+
+In the library, **批量管理** selects works individually or across the current search results. Choose the audio format and export the selected mixes in one ZIP. Confirming batch deletion permanently removes the selected works' mixes, stems and run records from disk. Works moved to `output/.trash/` by an older version are still in that directory.
 
 During mixing, the studio detects and softens short buzzes that voice conversion can introduce on consonants. Pitch, pronunciation and timbre still depend on the vocal separation, the original performance and the pitch range covered by the training recordings.
 

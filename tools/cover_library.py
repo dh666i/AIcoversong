@@ -8,14 +8,21 @@ removes its entire run folder.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import Any
 import uuid
 from zipfile import ZIP_STORED, ZipFile
+
+if __package__:
+    from .audio_export import EXPORT_FORMATS, check_format, write_audio
+else:
+    from audio_export import EXPORT_FORMATS, check_format, write_audio
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +30,19 @@ DEFAULT_OUTPUT_ROOT = ROOT / "output"
 _RUN_NAME = re.compile(r"^run_[A-Za-z0-9][A-Za-z0-9_-]*$")
 _TITLE_LIMIT = 200
 _DELETE_LOCK = Lock()
+_EXPORT_TRACKS = {
+    "mix": ("cover.wav", "翻唱"),
+    "converted": ("my_vocals.wav", "翻唱人声"),
+    "vocals": ("vocals.wav", "原唱人声"),
+    "instrumental": ("instrumental.wav", "伴奏"),
+    "lead": ("lead_vocals.wav", "主唱"),
+    "backing": ("backing_vocals.wav", "和声"),
+    "duet_male": ("duet_male.wav", "男声原分轨"),
+    "duet_female": ("duet_female.wav", "女声原分轨"),
+    "duet_male_converted": ("duet_male_converted.wav", "转换后的男声部"),
+    "duet_female_converted": ("duet_female_converted.wav", "转换后的女声部"),
+    "duet_preserved": ("duet_preserved.wav", "保留的原唱部分"),
+}
 
 
 def _now() -> str:
@@ -239,13 +259,70 @@ def delete_selected(run_ids: list[str], *, output_root=None) -> tuple[list[str],
     return deleted, failed
 
 
-def export_selected(run_ids: list[str], destination: Path, *, output_root=None) -> None:
+def _export_title(title: str) -> str:
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")
+    # Stay within a filesystem component even for titles containing CJK or emoji.
+    clean = clean[:120].encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip(" .") or "翻唱"
+    return "_" + clean if PureWindowsPath(clean).is_reserved() else clean
+
+
+def _publish_download(staged: Path, destination: Path) -> None:
+    # Both operations fail if another request already published this filename.
+    if os.name == "nt":
+        staged.rename(destination)
+    else:
+        os.link(staged, destination)
+
+
+def list_export_tracks(work, *, output_root=None) -> dict[str, tuple[Path, str]]:
+    """Return the mix and named stems that still exist for a saved work."""
+    run = _run_from(work, _root(output_root))
+    available = {}
+    for key, (filename, label) in _EXPORT_TRACKS.items():
+        path = _safe_file(run, filename, required=(key == "mix"))
+        if path is not None:
+            available[key] = (path, label)
+    return available
+
+
+def export_track(work, track: str, destination_dir: Path, *, audio_format: str = "wav", output_root=None) -> Path:
+    """Export one named track from a finished work into a caller-owned directory."""
+    check_format(audio_format)
+    if not isinstance(track, str) or track not in _EXPORT_TRACKS:
+        raise ValueError("请选择作品中的有效音轨。")
+    metadata = get_work(work, output_root)
+    filename, label = _EXPORT_TRACKS[track]
+    source = _safe_file(Path(metadata["path"]), filename, required=True)
+    target = Path(destination_dir) / f"{_export_title(metadata['title'])} {label}.{audio_format}"
+    if target.exists():
+        raise FileExistsError(target)
+    with TemporaryDirectory(dir=destination_dir) as temp:
+        staged = Path(temp) / ("track." + audio_format)
+        write_audio(source, staged)
+        _publish_download(staged, target)
+    return target
+
+
+def export_selected(run_ids: list[str], destination: Path, *, output_root=None, audio_format: str = "wav") -> None:
     """Write only finished mixes, with portable, unique filenames inside the ZIP."""
+    check_format(audio_format)
     works = [get_work(run_id, output_root) for run_id in _selected_ids(run_ids)]
-    with ZipFile(destination, "x", compression=ZIP_STORED, allowZip64=True) as archive:
-        for index, work in enumerate(works, 1):
-            title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(work["title"])).strip(" .")[:120] or "翻唱"
-            archive.write(work["cover"], f"{index:03d} - {title}.wav")
+    destination = Path(destination)
+    if destination.exists():
+        raise FileExistsError(destination)
+    with TemporaryDirectory(dir=destination.parent) as temp:
+        staged = Path(temp) / "works.zip"
+        converted = Path(temp) / ("track." + audio_format)
+        with ZipFile(staged, "x", compression=ZIP_STORED, allowZip64=True) as archive:
+            for index, work in enumerate(works, 1):
+                name = f"{index:03d} - {_export_title(work['title'])}.{audio_format}"
+                if audio_format == "wav":
+                    archive.write(work["cover"], name)
+                else:
+                    write_audio(Path(work["cover"]), converted)
+                    archive.write(converted, name)
+                    converted.unlink()
+        _publish_download(staged, destination)
 
 
 def _new_run(root: Path) -> Path:

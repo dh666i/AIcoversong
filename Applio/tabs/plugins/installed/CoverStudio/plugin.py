@@ -10,6 +10,7 @@ Importing this module loads no audio model.
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 from pathlib import Path
@@ -449,7 +450,50 @@ def _file_url(path) -> str:
     return "/gradio_api/file=" + quote(str(path).replace("\\", "/"), safe="/:")
 
 
-def _track(path, download_name: str, label: str = "", main: bool = False) -> str:
+def _export_choices():
+    labels = {"wav": "WAV · 原文件", "flac": "FLAC · 无损压缩", "m4a": "M4A · AAC",
+              "ogg": "OGG · Vorbis", "opus": "Opus", "aiff": "AIFF · PCM"}
+    return [(labels.get(fmt, fmt.upper()), fmt) for fmt in library.EXPORT_FORMATS]
+
+
+def _audio_download_dialog():
+    options = "".join(f'<option value="{fmt}">{label}</option>' for label, fmt in _export_choices())
+    markup = (f'<dialog class="export-dialog" aria-labelledby="export-heading">'
+              '<h2 id="export-heading">下载音频</h2><p class="export-title"></p>'
+              f'<label>文件格式<select>{options}</select></label>'
+              '<p class="export-status" role="status" aria-live="polite"></p><div class="export-actions">'
+              '<button type="button" class="export-close">关闭</button>'
+              '<button type="button" class="export-start">下载 WAV</button></div></dialog>')
+
+    def encode(data):
+        if not isinstance(data, dict):
+            raise ValueError("下载信息无效。")
+        with tempfile.TemporaryDirectory(prefix="aicoversong-track-") as directory:
+            path = library.export_track(data.get("run"), data.get("track"), Path(directory),
+                                        audio_format=data.get("format"), output_root=pipeline.OUTPUT)
+            return {"url": _file_url(panel.move_resource_to_block_cache(path))}
+
+    async def prepare_audio(data):
+        try:
+            return await asyncio.to_thread(encode, data)
+        except (ValueError, OSError) as error:
+            return {"error": str(error)}
+
+    script = (_ROOT / "Applio/assets/ui/cover-download.js").read_text(encoding="utf-8")
+    panel = gr.HTML(markup, elem_id="audio-download", container=False, apply_default_css=False,
+                    js_on_load=script, server_functions=[prepare_audio])
+
+
+def _download_link(path, download_name, caption, label, track):
+    file = Path(path)
+    return (f'<a class="save" href="{html.escape(_file_url(file), quote=True)}" '
+            f'data-export-run="{html.escape(file.parent.name, quote=True)}" '
+            f'data-export-track="{html.escape(track, quote=True)}" '
+            f'download="{html.escape(download_name, quote=True)}" aria-haspopup="dialog" '
+            f'aria-label="{html.escape(label, quote=True)}">{caption}</a>')
+
+
+def _track(path, download_name: str, label: str = "", main: bool = False, *, track: str = "mix") -> str:
     """One player with its download link. The browser's own player: press play, click anywhere on the bar."""
     url = html.escape(_file_url(path), quote=True)
     name = f'<span class="track-name">{html.escape(label)}</span>' if label else ""
@@ -457,23 +501,23 @@ def _track(path, download_name: str, label: str = "", main: bool = False) -> str
             f'<audio controls preload="metadata" controlslist="nodownload noplaybackrate" src="{url}"></audio>'
             f'<span class="track-status" role="status" aria-live="polite"><span class="track-message">正在读取音频信息…</span>'
             f'<button type="button" class="track-retry" hidden>重试</button></span>'
-            f'<a class="save" href="{url}" download="{html.escape(download_name, quote=True)}">'
-            f'{"下载成品" if main else "下载"}</a></div>')
+            + _download_link(path, download_name, "下载成品" if main else "下载", "下载：" + download_name, track)
+            + '</div>')
 
 
 def _result_html(item: dict, title: str) -> str:
     """What is shown when a cover is finished: the cover, and the separate stems behind a fold."""
     if not item.get("mix"):
         return ""
-    parts = [("已转换的声部" if item.get("duet_male") else "只有我的人声", item.get("converted"), "翻唱人声"),
-             ("原唱的人声", item.get("vocals"), "原唱人声"),
-             ("伴奏", item.get("instrumental"), "伴奏")]
+    parts = [("converted", "已转换的声部" if item.get("duet_male") else "只有我的人声", "翻唱人声"),
+             ("vocals", "原唱的人声", "原唱人声"), ("instrumental", "伴奏", "伴奏")]
     for key, name in (("duet_male", "男声原分轨"), ("duet_female", "女声原分轨"),
                       ("duet_male_converted", "转换后的男声部"), ("duet_female_converted", "转换后的女声部"),
                       ("duet_preserved", "保留的原唱部分")):
         if item.get(key):
-            parts.append((name, item[key], name))
-    rows = "".join(_track(file, f"{title} {suffix}.wav", label) for label, file, suffix in parts if file)
+            parts.append((key, name, name))
+    rows = "".join(_track(item[key], f"{title} {suffix}.wav", label, track=key)
+                   for key, label, suffix in parts if item.get(key))
     fold = f'<details class="parts"><summary>分开听</summary>{rows}</details>' if rows else ""
     return (f'<section class="result"><div class="result-heading"><span class="eyebrow">制作完成</span>'
             f'<h3>{html.escape(title)}</h3><p>成品已保存到作品库</p></div>'
@@ -768,9 +812,12 @@ def _cover_tab(cover_tab=None):
             gr.HTML('<div class="panel-head"><h2 class="panel-title">歌曲与音色</h2></div>', container=False)
             with gr.Column(elem_id="cover-form") as form:
                 with gr.Column(elem_id="song-field"):
+                    audio_types = sorted(pipeline.AUDIO_EXTENSIONS)
+                    formats = " / ".join(ext[1:].upper() for ext in audio_types)
                     gr.HTML('<div class="song-field-label"><span>原曲文件</span>'
-                            '<small>MP3 / FLAC / WAV / M4A</small></div>', container=False)
-                    song = gr.File(label="原曲文件", file_types=["audio"], type="filepath",
+                            f'<small title="{formats}">MP3 / FLAC / WAV 等 {len(audio_types)} 种扩展名</small></div>',
+                            container=False)
+                    song = gr.File(label="原曲文件", file_types=audio_types, type="filepath",
                                    show_label=False, elem_id="song-drop", height=84)
                 mode = gr.Dropdown(label="翻唱范围", choices=DUET_MODES, value="off",
                                    filterable=False, interactive=True, elem_id="duet-mode")
@@ -783,8 +830,8 @@ def _cover_tab(cover_tab=None):
                     gr.HTML('<p class="field-note">两轨需与原曲从同一时间起点导出，保留休止处的静音和完整曲长。</p>',
                             container=False)
                     with gr.Row():
-                        male_stem = gr.File(label="原男声分轨", file_types=[".wav", ".flac"], type="filepath", height=95)
-                        female_stem = gr.File(label="原女声分轨", file_types=[".wav", ".flac"], type="filepath", height=95)
+                        male_stem = gr.File(label="原男声分轨", file_types=audio_types, type="filepath", height=95)
+                        female_stem = gr.File(label="原女声分轨", file_types=audio_types, type="filepath", height=95)
                 with gr.Row(elem_id="voice-picker-row"):
                     model = gr.Dropdown(label="我的音色", choices=voices, value=selected_voice,
                                         filterable=False, interactive=True, elem_id="voice-pick", scale=5,
@@ -1271,7 +1318,8 @@ def _history_html(rows, total, selected=None):
         active_attr = "true" if active else "false"
         name = html.escape(row["title"], quote=True)
         run_id = html.escape(row["run_id"], quote=True)
-        url = html.escape(_file_url(row["cover"]), quote=True)
+        download = _download_link(row["cover"], f'{row["title"]} 翻唱.wav',
+                                  _DOWNLOAD_ICON + "下载", f'下载：{row["title"]}', "mix")
         duration = _history_duration(row["cover"])
         duration_markup = f'<span class="work-duration" aria-label="时长 {duration}">{duration}</span>' if duration else ""
         items.append(
@@ -1282,7 +1330,7 @@ def _history_html(rows, total, selected=None):
             f'{"收起" if active else "管理"}</button></div>'
             f'<div class="work-actions"><button type="button" class="work-play" data-preview="{run_id}" '
             f'aria-controls="library-audio" aria-label="试听：{name}">{_PLAY_ICON}{_PAUSE_ICON}<span>试听</span></button>'
-            f'<a class="save" href="{url}" download="{name} 翻唱.wav" aria-label="下载：{name}">{_DOWNLOAD_ICON}下载</a></div></li>')
+            f'{download}</div></li>')
     return (f'<p class="history-note" role="status">显示 {len(rows)} / {total} 首作品</p>'
             '<ul class="history" aria-label="作品列表">' + "".join(items) + "</ul>")
 
@@ -1458,14 +1506,16 @@ def _confirm_delete_js(bulk):
 }""".replace("SOURCE", source)
 
 
-def _history_export(ids):
+def _history_export(ids, audio_format="wav"):
     from gradio.processing_utils import save_file_to_cache
     from gradio.utils import get_upload_folder
 
     try:
         with tempfile.TemporaryDirectory(prefix="aicoversong-export-") as directory:
-            archive = Path(directory) / "AIcoversong-works.zip"
-            library.export_selected(ids, archive, output_root=pipeline.OUTPUT)
+            if audio_format not in library.EXPORT_FORMATS:
+                raise ValueError("请选择有效的导出格式。")
+            archive = Path(directory) / f"AIcoversong-{len(ids)}首-{audio_format}.zip"
+            library.export_selected(ids, archive, audio_format=audio_format, output_root=pipeline.OUTPUT)
             cached = save_file_to_cache(archive, get_upload_folder())
     except (OSError, ValueError) as exc:
         raise gr.Error(str(exc), title="未能打包作品", print_exception=False) from exc
@@ -1477,9 +1527,15 @@ def _history_selection(work):
         return (gr.update(visible=False), "", "", 0, 0, 0.75, 1.0, "original")
     job = work["job"]
     duet = job.get("duet_mode", "off") != "off"
+    tracks = library.list_export_tracks(work["run_id"], output_root=pipeline.OUTPUT)
+    links = "".join(_download_link(path, f'{work["title"]} {label}.wav', html.escape(label),
+                                   "下载：" + label, key)
+                    for key, (path, label) in tracks.items() if key != "mix")
     note = (f'<div class="history-section-heading" data-work="{html.escape(work["run_id"], quote=True)}">'
             '<span class="eyebrow">作品管理</span>'
             f'<h3>{html.escape(work["title"])}</h3></div>')
+    if links:
+        note += f'<details class="parts"><summary>下载分轨</summary><div class="stem-downloads">{links}</div></details>'
     return (gr.update(visible=True), note, work["title"],
             gr.update(value=float(job.get("vocal_gain", 0)), label="翻唱声部音量（dB）" if duet else "人声音量（dB）"),
             float(job.get("instrumental_gain", 0)), float(job.get("clarity", 0.75)),
@@ -1532,6 +1588,8 @@ def _history_tab(history_tab):
         bulk_ids = gr.CheckboxGroup(choices=_work_choices(rows), value=[], label=f"全选 / 清空当前筛选 · {len(rows)} 首",
                                     show_select_all=True, interactive=True, elem_id="history-bulk-selection")
         with gr.Row(elem_id="history-bulk-actions"):
+            archive_format = gr.Dropdown(choices=_export_choices(), value="wav", label="ZIP 内音频格式",
+                                         filterable=False, scale=1, min_width=140, interactive=True)
             export = gr.Button("打包下载", size="sm", interactive=False, scale=0, min_width=120)
             bulk_delete = gr.Button("删除所选", elem_id="history-bulk-delete", size="sm",
                                     interactive=False, scale=0, min_width=126)
@@ -1568,8 +1626,10 @@ def _history_tab(history_tab):
     view.click(_history_pick, inputs=None, outputs=[selected, status, *selection_outputs], **quiet)
     bulk_ids.input(lambda ids: (*_batch_actions(ids), gr.update(visible=False, value=None)),
                    inputs=[bulk_ids], outputs=[export, bulk_delete, archive], **quiet)
-    export.click(_history_export, inputs=[bulk_ids], outputs=[archive],
+    archive_export = export.click(_history_export, inputs=[bulk_ids, archive_format], outputs=[archive],
                  queue=True, trigger_mode="once", show_progress="minimal", show_progress_on=[export])
+    gr.on([bulk_ids.input, archive_format.input, search.input, order.input, refresh.click, history_tab.select],
+          lambda: gr.update(visible=False, value=None), outputs=[archive], cancels=[archive_export], **quiet)
     for button, bulk in ((delete, False), (bulk_delete, True)):
         button.click(_history_delete, js=_confirm_delete_js(bulk), inputs=[confirmed_ids, search, order, selected, bulk_ids],
                      outputs=refresh_outputs, queue=True, trigger_mode="once", show_progress="hidden", api_name=False)
@@ -1593,6 +1653,7 @@ def applio_plugin():
             training = _voice_tab()
         with gr.Tab("作品库", id="history", elem_id="studio-history") as history_tab:
             _history_tab(history_tab)
+    _audio_download_dialog()
     training.then(_refresh_voices, outputs=[model], queue=False, show_progress="hidden").then(
         _duet_second_voices, inputs=[second], outputs=[second], queue=False, show_progress="hidden", api_name=False)
     return tabs

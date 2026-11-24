@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -15,6 +16,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 import cover_library as library
+import audio_export
 
 
 class CoverLibraryTests(unittest.TestCase):
@@ -147,6 +149,80 @@ class CoverLibraryTests(unittest.TestCase):
                 self.assertTrue(name.endswith(".wav"))
                 self.assertNotRegex(name, r'[/\\:]')
                 self.assertEqual(archive.read(name), b"cover")
+
+    def test_export_track_limits_sources_and_preserves_existing_download(self):
+        folder = Path(self.temp.name)
+        tracks = library.list_export_tracks(self.run.name, output_root=self.root)
+        self.assertEqual(set(tracks), {"mix", "instrumental", "backing"})
+        self.assertEqual(tracks["instrumental"][0], (self.run / "instrumental.wav").resolve())
+        with self.assertRaises(ValueError):
+            library.export_track(self.run.name, "../job.json", folder, output_root=self.root)
+        with self.assertRaises(ValueError):
+            library.export_track(self.run.name, "mix", folder, audio_format="../wav", output_root=self.root)
+        library.rename_work(self.run.name, "CON.1", self.root)
+        track = library.export_track(self.run.name, "instrumental", folder, output_root=self.root)
+        self.assertEqual(track.name, "_CON.1 伴奏.wav")
+        self.assertEqual(track.read_bytes(), b"audio")
+        track.write_bytes(b"previous download")
+        with self.assertRaises(FileExistsError):
+            library.export_track(self.run.name, "instrumental", folder, output_root=self.root)
+        self.assertEqual(track.read_bytes(), b"previous download")
+
+    def test_failed_conversion_leaves_no_partial_download(self):
+        folder = Path(self.temp.name) / "downloads"
+        folder.mkdir()
+        extra = self._make_run("run_second")
+        calls = []
+
+        def encode(source, target):
+            calls.append(source.parent.name)
+            target.write_bytes(b"incomplete")
+            if source.parent.name == extra.name:
+                raise ValueError("conversion failed")
+
+        with patch.object(library, "write_audio", encode):
+            with self.assertRaisesRegex(ValueError, "conversion failed"):
+                library.export_selected([self.run.name, extra.name], folder / "mixes.zip",
+                                        audio_format="mp3", output_root=self.root)
+            with self.assertRaisesRegex(ValueError, "conversion failed"):
+                library.export_track(extra.name, "mix", folder, audio_format="mp3", output_root=self.root)
+        self.assertEqual(calls, [self.run.name, extra.name, extra.name])
+        self.assertEqual(list(folder.iterdir()), [])
+
+    @unittest.skipUnless(audio_export.FFMPEG.is_file(), "requires installed FFmpeg")
+    def test_download_formats_and_batch_contents_decode_with_correct_channels(self):
+        import numpy as np
+        import soundfile as sf
+
+        sr = 44100
+        t = np.arange(sr) / sr
+        reference = np.stack((.2 * np.sin(2*np.pi*300*t), .15 * np.sin(2*np.pi*540*t)), axis=1)
+        master = self.run / "cover.wav"
+        sf.write(master, reference, sr, subtype="PCM_24")
+        source = master.read_bytes()
+        expected, _ = sf.read(master, dtype="float32")
+        folder = Path(self.temp.name)
+        for fmt in library.EXPORT_FORMATS:
+            with self.subTest(fmt=fmt):
+                exported = library.export_track(self.run.name, "mix", folder, audio_format=fmt, output_root=self.root)
+                decoded = subprocess.check_output(
+                    [str(audio_export.FFMPEG), "-v", "error", "-i", str(exported),
+                     "-ar", str(sr), "-f", "f32le", "-"])
+                samples = np.frombuffer(decoded, dtype="<f4").reshape(-1, 2)
+                # AAC may append up to one codec frame of padding.
+                self.assertLess(abs(len(samples) - sr), 1024)
+                for channel in range(2):
+                    self.assertGreater(np.corrcoef(samples[1500:40000, channel], expected[1500:40000, channel])[0, 1], .99)
+                if fmt in {"wav", "aiff", "flac"}:
+                    np.testing.assert_array_equal(samples, expected)
+                if fmt == "wav":
+                    self.assertEqual(exported.read_bytes(), source)
+        archive = folder / "library.zip"
+        library.export_selected([self.run.name], archive, output_root=self.root, audio_format="mp3")
+        with ZipFile(archive) as zipped:
+            self.assertEqual(zipped.namelist(), ["001 - My Song.mp3"])
+            self.assertEqual(zipped.read(zipped.namelist()[0]), (folder / "My Song 翻唱.mp3").read_bytes())
+        self.assertEqual(master.read_bytes(), source)
 
     def test_remix_creates_new_version_and_keeps_parent(self):
         calls = []

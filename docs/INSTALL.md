@@ -63,7 +63,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup.ps1 -DownloadMod
 2. **Git 安装**：在项目根目录运行 `git pull --ff-only`。**ZIP 安装**：将[最新版源码包](https://github.com/dh666i/AIcoversong/releases/latest/download/AIcoversong-source.zip)解压到临时目录，把解出的 `AIcoversong` 文件夹里的内容合并到原安装目录，替换同名源码。保留原目录中的录音、作品、训练模型、环境和本机配置。
 3. 双击原安装目录中的 `启动翻唱.bat`。如果浏览器里还开着旧标签页，刷新 `http://127.0.0.1:6969`。启动器会复用已经运行的服务，所以更新源码后需要重新启动服务才能载入新界面。
 
-升级到 v0.3.0 后，可以继续使用已有的个人音色。要让旧作品应用辅音蜂鸣修复，在「作品库」里从已保存的分轨创建新混音。要修复自动分轨时漏掉的合唱声部，在「创作工作台」重新选择原曲并开始翻唱，工作台会在换声前重新分离主唱与和声。两种操作都会生成新作品。
+升级后可以继续使用已有的个人音色。自 v0.4.0 起，旧作品可以直接下载为 MP3、FLAC 等格式。要导出其中一条音轨，在「作品库」打开「管理 → 下载分轨」。
+
+要让旧作品应用辅音蜂鸣修复，在「作品库」里从已保存的分轨创建新混音。要修复自动分轨时漏掉的合唱声部，在「创作工作台」重新选择原曲并开始翻唱，工作台会在换声前重新分离主唱与和声。两种操作都会生成新作品。
 
 ## 录音和音色
 
@@ -101,4 +103,6 @@ For automatic duet separation, run `.\env\Scripts\python.exe tools/download_asse
 
 **Update.** Let any active job finish and run `关闭翻唱.bat`. For a Git installation on `main`, run `git pull --ff-only`. For a ZIP installation, extract the verified release to a temporary folder, then merge its source files into the existing installation. Keep your local recordings (`recordings/`), covers (`output/`), voice models (`Applio/logs/`), settings (`Applio/assets/config.json`) and installed environments. Restart with `启动翻唱.bat`.
 
-Existing voice models work with v0.3.0. To reduce consonant buzz in a saved cover, use the library to make a new mix from its saved stems. For a missed chorus part, start a new cover from the original song so the separator can reassess the two singers before conversion. Both operations create a new library entry.
+Existing voice models work after upgrading. Starting with v0.4.0, you can export existing covers as MP3, FLAC or another supported format. Open **管理 → 下载分轨** in the library to export an individual stem.
+
+To reduce consonant buzz in a saved cover, use the library to make a new mix from its saved stems. For a missed chorus part, start a new cover from the original song so the separator can reassess the two singers before conversion. Both operations create a new library entry.

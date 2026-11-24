@@ -96,6 +96,20 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn('aria-expanded="false"', rendered)
         self.assertNotIn('aria-pressed=', rendered)
 
+    def test_downloads_bind_to_the_selected_work_and_available_stem(self):
+        run_id = self.add_work("download", "旧歌.wav")
+        folder = self.output / run_id
+        (folder / "instrumental.wav").write_bytes(b"fixture")
+        updates = ui._history_pick(ui.gr.EventData(None, {"run_id": run_id}))
+        note = updates[3]
+        self.assertIn("下载分轨", note)
+        self.assertIn(f'data-export-run="{run_id}"', note)
+        self.assertIn('data-export-track="instrumental"', note)
+        self.assertNotIn('data-export-track="converted"', note)
+        result = ui._result_html({"mix": folder / "cover.wav", "instrumental": folder / "instrumental.wav"}, "旧歌")
+        for track in ("mix", "instrumental"):
+            self.assertIn(f'data-export-track="{track}"', result)
+
     def test_card_durations_read_wav_headers_without_mounting_media(self):
         run_id = self.add_work("abcd", "Preview.wav")
         path = self.output / run_id / "cover.wav"

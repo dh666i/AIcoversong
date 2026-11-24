@@ -29,6 +29,11 @@ import traceback
 import uuid
 from datetime import datetime
 
+if __package__:
+    from .audio_input import AUDIO_EXTENSIONS, decode_audio
+else:
+    from audio_input import AUDIO_EXTENSIONS, decode_audio
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APPLIO = ROOT / "Applio"
@@ -41,7 +46,6 @@ LEAD_MODEL = "bs_roformer_karaoke_frazer_becruily.ckpt"
 LEAD_CONFIG = "config_bs_roformer_karaoke_frazer_becruily.yaml"
 DEREVERB_MODEL = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt"
 DEREVERB_CONFIG = "dereverb_mel_band_roformer_anvuew.yaml"
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".aif"}
 NO_INDEX = "不使用索引"
 BACKING_MODES = ("original", "convert", "remove")
 # How the lead is fitted to the pitch range of the voice model:
@@ -67,7 +71,7 @@ def _audio(path: str | Path | None) -> Path:
     if not result.is_file() or result.stat().st_size == 0:
         raise ValueError("音频文件不存在或为空，请重新上传。")
     if result.suffix.lower() not in AUDIO_EXTENSIONS:
-        raise ValueError("请上传 WAV、MP3、FLAC、M4A、AAC、OGG 等音频文件。")
+        raise ValueError("不支持此扩展名。可上传：" + "、".join(ext[1:].upper() for ext in AUDIO_EXTENSIONS) + "。")
     return result
 
 
@@ -348,8 +352,6 @@ def run_cover(song, model=None, index=NO_INDEX, pitch=0, index_rate=0.25,
             raise ValueError("使用已有分轨时，请同时上传对齐原曲的男声和女声。")
         if duet_male_stem:
             sources = {role: _audio(path) for role, path in zip(ROLES, (duet_male_stem, duet_female_stem))}
-            if any(path.suffix.lower() not in {".wav", ".flac"} for path in sources.values()):
-                raise ValueError("对唱人声分轨请使用 WAV 或 FLAC。")
             if sources["male"].samefile(sources["female"]):
                 raise ValueError("男声和女声不能使用同一份分轨。")
         else:
@@ -463,20 +465,8 @@ def _separator_input(source: Path, run: Path) -> str:
     """Decode compressed input to PCM so its codec tag is valid for WAV output."""
     import soundfile as sf
 
-    ffmpeg = APPLIO / "ffmpeg.exe"
-    if not ffmpeg.is_file():
-        raise FileNotFoundError(f"缺少 FFmpeg：{ffmpeg}")
     output = run / "separator_input.wav"
-    completed = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-         "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
-         "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(output)],
-        cwd=str(APPLIO), env=_environment(), capture_output=True, text=True,
-        **_process_options(),
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or "").strip()[-1600:]
-        raise RuntimeError(f"无法把歌曲解码为分离用 WAV：{detail or completed.returncode}")
+    decode_audio(source, output, separation_input=True)
     try:
         info = sf.info(str(output))
     except (OSError, RuntimeError) as exc:
